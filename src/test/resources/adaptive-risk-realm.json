@@ -1,0 +1,112 @@
+{
+  "realm": "__REALM__",
+  "enabled": true,
+  "sslRequired": "none",
+  "eventsEnabled": true,
+  "enabledEventTypes": ["LOGIN", "LOGIN_ERROR"],
+  "browserFlow": "adaptive browser",
+  "clients": [
+    {
+      "clientId": "it-app",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "redirectUris": ["http://localhost/callback"]
+    }
+  ],
+  "users": [
+    {
+      "username": "alice",
+      "enabled": true,
+      "email": "alice@example.com",
+      "emailVerified": true,
+      "firstName": "Alice",
+      "lastName": "Example",
+      "credentials": [
+        {"type": "password", "value": "alice-password"},
+        {
+          "type": "otp",
+          "userLabel": "phone",
+          "secretData": "{\"value\":\"JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP\"}",
+          "credentialData": "{\"subType\":\"totp\",\"digits\":6,\"period\":30,\"algorithm\":\"HmacSHA1\",\"counter\":0}"
+        }
+      ]
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "email": "bob@example.com",
+      "emailVerified": true,
+      "firstName": "Bob",
+      "lastName": "Example",
+      "credentials": [
+        {"type": "password", "value": "bob-password"},
+        {
+          "type": "otp",
+          "userLabel": "phone",
+          "secretData": "{\"value\":\"JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP\"}",
+          "credentialData": "{\"subType\":\"totp\",\"digits\":6,\"period\":30,\"algorithm\":\"HmacSHA1\",\"counter\":0}"
+        }
+      ]
+    }
+  ],
+  "authenticatorConfig": [
+    {
+      "alias": "adaptive risk",
+      "config": {"learning-score": "__LEARNING_SCORE__"}
+    },
+    {
+      "alias": "risk is high",
+      "config": {"risk-level": "high", "match": "at-least"}
+    },
+    {
+      "alias": "risk is medium",
+      "config": {"risk-level": "medium", "match": "exactly"}
+    }
+  ],
+  "authenticationFlows": [
+    {
+      "alias": "adaptive browser",
+      "description": "Recommended browser flow from the README",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {"authenticator": "auth-cookie", "requirement": "ALTERNATIVE", "priority": 10, "authenticatorFlow": false, "userSetupAllowed": false},
+        {"requirement": "ALTERNATIVE", "priority": 20, "authenticatorFlow": true, "flowAlias": "adaptive forms", "userSetupAllowed": false}
+      ]
+    },
+    {
+      "alias": "adaptive forms",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {"authenticator": "auth-username-password-form", "requirement": "REQUIRED", "priority": 10, "authenticatorFlow": false, "userSetupAllowed": false},
+        {"authenticator": "skycloak-adaptive-risk", "authenticatorConfig": "adaptive risk", "requirement": "REQUIRED", "priority": 20, "authenticatorFlow": false, "userSetupAllowed": false},
+        {"requirement": "CONDITIONAL", "priority": 30, "authenticatorFlow": true, "flowAlias": "adaptive deny high", "userSetupAllowed": false},
+        {"requirement": "CONDITIONAL", "priority": 40, "authenticatorFlow": true, "flowAlias": "adaptive step-up medium", "userSetupAllowed": false}
+      ]
+    },
+    {
+      "alias": "adaptive deny high",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {"authenticator": "skycloak-adaptive-risk-condition", "authenticatorConfig": "risk is high", "requirement": "REQUIRED", "priority": 10, "authenticatorFlow": false, "userSetupAllowed": false},
+        {"authenticator": "deny-access-authenticator", "requirement": "REQUIRED", "priority": 20, "authenticatorFlow": false, "userSetupAllowed": false}
+      ]
+    },
+    {
+      "alias": "adaptive step-up medium",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {"authenticator": "skycloak-adaptive-risk-condition", "authenticatorConfig": "risk is medium", "requirement": "REQUIRED", "priority": 10, "authenticatorFlow": false, "userSetupAllowed": false},
+        {"authenticator": "conditional-user-configured", "requirement": "REQUIRED", "priority": 20, "authenticatorFlow": false, "userSetupAllowed": false},
+        {"authenticator": "auth-otp-form", "requirement": "REQUIRED", "priority": 30, "authenticatorFlow": false, "userSetupAllowed": false}
+      ]
+    }
+  ]
+}

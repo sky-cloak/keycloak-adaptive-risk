@@ -1,0 +1,2 @@
+io.skycloak.keycloak.adaptiverisk.AdaptiveRiskAuthenticatorFactory
+io.skycloak.keycloak.adaptiverisk.RiskLevelConditionFactory

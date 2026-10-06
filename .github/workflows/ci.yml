@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Keycloak ${{ matrix.keycloak }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest supported 26.x line and the newest 26.x release. Bump the second when a new
+        # 26.x ships.
+        keycloak: ["26.2.5", "26.7.4"]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      # Compiles against, unit tests, packages, then boots quay.io/keycloak/keycloak:<version>
+      # with the jar (Testcontainers) and drives real browser logins.
+      - name: Unit and integration tests
+        run: mvn -B -Dkeycloak.version=${{ matrix.keycloak }} verify

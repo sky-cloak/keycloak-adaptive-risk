@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Verify tag matches pom version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          POM_VERSION=$(mvn -q help:evaluate -Dexpression=project.version -DforceStdout)
+          if [[ "$TAG_VERSION" != "$POM_VERSION" ]]; then
+            echo "::error::Tag '$GITHUB_REF_NAME' implies version '$TAG_VERSION' but pom.xml declares '$POM_VERSION'. Bump the pom or retag."
+            exit 1
+          fi
+          echo "Releasing $POM_VERSION"
+
+      - name: Sanity-check against the newest Keycloak 26.x
+        run: mvn -B -Dkeycloak.version=26.7.4 clean compile
+
+      # Built against the oldest supported line (the pom default), so the jar runs on every 26.x
+      # from there on. The integration tests already ran on both versions in CI.
+      - name: Build release JAR
+        run: mvn -B clean package
+
+      - name: Compose release notes
+        id: notes
+        run: |
+          set -euo pipefail
+          PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${GITHUB_REF_NAME}$" | head -n1 || true)
+          ARTIFACT=target/keycloak-adaptive-risk.jar
+          {
+            echo "## Install"
+            echo
+            echo "Download \`keycloak-adaptive-risk.jar\` from the Assets below and copy it into Keycloak's providers directory:"
+            echo
+            echo '```bash'
+            echo "cp keycloak-adaptive-risk.jar /opt/keycloak/providers/"
+            echo '```'
+            echo
+            echo "Rebuild or restart Keycloak. See the [README](https://github.com/${GITHUB_REPOSITORY}#readme) for the recommended flow and configuration."
+            echo
+            echo "## Keycloak compatibility"
+            echo
+            echo "Keycloak 26.2 and later 26.x. Tested in CI on 26.2.5 and 26.7.4."
+            echo
+            if [[ -n "$PREV_TAG" ]]; then
+              echo "## Changes since ${PREV_TAG}"
+              echo
+              git log --pretty='* %s (%h)' "${PREV_TAG}..HEAD"
+            else
+              echo "## First tagged release"
+              echo
+              echo "See the README for what ships in this version."
+            fi
+          } > release-notes.md
+          echo "artifact_path=$ARTIFACT" >> "$GITHUB_OUTPUT"
+
+      - name: Create release and attach JAR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          IS_PRERELEASE=""
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            IS_PRERELEASE="--prerelease"
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            $IS_PRERELEASE \
+            "${{ steps.notes.outputs.artifact_path }}"
