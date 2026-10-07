@@ -88,7 +88,8 @@ class IsolatedStatementTest {
 
         assertEquals(IsolatedStatement.Status.OK, outcome.status());
         assertEquals(3, outcome.value());
-        assertEquals(List.of("savepoint", "prepare", "timeout 2", "execute", "close", "release"), calls);
+        // The timeout is reset before close: H2 applies it to the whole session, not the statement.
+        assertEquals(List.of("savepoint", "prepare", "timeout 2", "execute", "timeout 0", "close", "release"), calls);
     }
 
     @Test
@@ -103,12 +104,33 @@ class IsolatedStatementTest {
     }
 
     @Test
-    void withoutSavepointsNothingRunsAndTheCallerIsTold() {
+    void withoutSavepointsTheStatementStillRunsUnisolated() {
         IsolatedStatement.Outcome<Integer> outcome = run(connection(false,
                 new SQLException("setSavePoint not allowed while an XA transaction is active"), null, null));
 
-        assertEquals(IsolatedStatement.Status.NO_SAVEPOINT, outcome.status());
-        assertFalse(calls.contains("prepare"), calls.toString());
+        assertEquals(IsolatedStatement.Status.OK, outcome.status());
+        assertFalse(outcome.isolated());
+        assertTrue(calls.contains("execute"), calls.toString());
+    }
+
+    @Test
+    void aRuntimeErrorWhileReadingTheResultStillRollsBackToTheSavepoint() {
+        Connection connection = connection(false, null, null, null);
+
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class, () ->
+                IsolatedStatement.run(connection, "SELECT 1", 2, statement -> { }, statement -> {
+                    throw new IllegalStateException("bad row");
+                }));
+        assertTrue(calls.contains("rollback to savepoint"), calls.toString());
+        assertTrue(calls.contains("timeout 0"), calls.toString());
+    }
+
+    @Test
+    void aZeroTimeoutIsNeverSet() {
+        IsolatedStatement.run(connection(false, null, null, null), "DELETE FROM T", 0, statement -> { },
+                PreparedStatement::executeUpdate);
+
+        assertFalse(calls.stream().anyMatch(c -> c.startsWith("timeout")), calls.toString());
     }
 
     @Test
@@ -130,13 +152,20 @@ class IsolatedStatementTest {
     }
 
     @Test
-    void aPoolThatCannotUnwrapFallsBack() {
+    void aPoolThatCannotUnwrapRunsOnThePooledConnection() {
+        Connection physical = connection(false, null, null, null);
         Connection pooled = (Connection) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class},
                 (p, m, a) -> {
-                    throw new SQLException("unwrap not supported");
+                    if (m.getName().equals("unwrap")) {
+                        throw new SQLException("unwrap not supported");
+                    }
+                    return m.invoke(physical, a);
                 });
 
-        assertEquals(IsolatedStatement.Status.NO_SAVEPOINT, run(pooled).status());
+        IsolatedStatement.Outcome<Integer> outcome = run(pooled);
+
+        assertEquals(IsolatedStatement.Status.OK, outcome.status());
+        assertTrue(outcome.isolated());
     }
 
     @Test
@@ -144,7 +173,7 @@ class IsolatedStatementTest {
         IsolatedStatement.Outcome<Integer> outcome = run(connection(true, null, null, null));
 
         assertEquals(IsolatedStatement.Status.OK, outcome.status());
-        assertEquals(List.of("prepare", "timeout 2", "execute", "close"), calls);
+        assertEquals(List.of("prepare", "timeout 2", "execute", "timeout 0", "close"), calls);
     }
 
     @Test
@@ -161,6 +190,8 @@ class IsolatedStatementTest {
         assertTrue(IsolatedStatement.isMissingTable(new SQLException("x", "42S02")), "MySQL, MariaDB, SQL Server, H2");
         assertTrue(IsolatedStatement.isMissingTable(new SQLException("x", "S0002")), "older SQL Server drivers");
         assertTrue(IsolatedStatement.isMissingTable(new SQLException("x", "42000", 942)), "Oracle ORA-00942");
+        assertFalse(IsolatedStatement.isMissingTable(new SQLException("database offline", "S1000", 942)),
+                "942 means a missing table only on Oracle");
         assertTrue(IsolatedStatement.isMissingTable(new SQLException("x", "42102", 42102)), "H2 by error code");
         assertTrue(IsolatedStatement.isMissingTable(new SQLException("outer", "XX000", new SQLException("x", "42P01"))),
                 "anywhere in the chain");

@@ -125,6 +125,20 @@ class FailOpenIT {
         admin.deleteUser(realm, userId);
     }
 
+    @Test
+    void aRealmWithMillionsOfProfilesCanStillBeDeleted() throws Exception {
+        String big = "adaptive-big-" + UUID.randomUUID().toString().substring(0, 8);
+        admin.importRealm(realmJson(big));
+        String realmId = KeycloakTestServer.sql("SELECT id FROM realm WHERE name = '" + big + "'");
+        KeycloakTestServer.sql("INSERT INTO " + TABLE + " (id, realm_id, user_id, login_count, last_login_at) "
+                + "SELECT substr(md5(i::text), 1, 32), '" + realmId + "', 'user-' || i, 1, 0 FROM generate_series(1, 3000000) i");
+
+        admin.deleteRealm(big);
+
+        assertEquals("0", KeycloakTestServer.sql("SELECT count(*) FROM " + TABLE + " WHERE realm_id = '" + realmId + "'"));
+        assertEquals("0", KeycloakTestServer.sql("SELECT count(*) FROM realm WHERE id = '" + realmId + "'"));
+    }
+
     private static Map<String, String> lastLogin(String username) throws Exception {
         List<Map<String, String>> logins = admin.eventDetails(realm, admin.userId(realm, username), "LOGIN");
         assertTrue(!logins.isEmpty(), "no LOGIN event for " + username);

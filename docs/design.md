@@ -12,7 +12,7 @@ in the [README](../README.md).
 | Condition | `RiskLevelCondition` (`skycloak-adaptive-risk-condition`) | Matches the stored level against its configured level, at least or exactly. |
 | Scorer | `RiskScorer` | Pure function: settings, profile and login signals in, score, level and reasons out. |
 | Profile | `RiskProfile` | One user's bounded history, with recording, aging and eviction. |
-| Storage | `RiskProfileEntity`, `JpaProfileStore`, `RiskProfileEntityProviderFactory` | JPA entity, Liquibase changelog, reads, writes, and cleanup on user and realm removal. |
+| Storage | `RiskProfileEntity`, `JpaProfileStore`, `IsolatedStatement`, `RiskProfileEntityProviderFactory` | Table declaration and Liquibase changelog, savepoint-isolated SQL reads and writes, and cleanup on user and realm removal. |
 | Request signals | `TrustedHeaders`, `Networks`, `DeviceCookie` | Client address and country from the trusted headers, network prefix, device cookie. |
 | Metric | `RiskMetrics` | `skycloak_adaptive_risk_evaluations{level, outcome, realm}`. |
 
@@ -137,35 +137,35 @@ Each write refreshes the entries the login touched, drops entries unseen for the
 a long absence is still compared with their old history once, and the successful login then
 replaces it.
 
-**Transactions.** Every statement of the extension runs on the request's own connection, in
-the request's own transaction, isolated by a JDBC savepoint and bounded by a 2 second query
-timeout (`store/IsolatedStatement`). On PostgreSQL a failed statement aborts the transaction it
-runs in; rolling back to the savepoint undoes only the extension's statement, so a missing,
-locked or overloaded table fails the evaluation open (or skips the learning) while the login
-carries on. Using the request's connection, rather than a transaction of its own, means the
-extension never takes a second pooled connection: under a busy pool a second connection would
-make every login wait for the pool's acquisition timeout. Keycloak's connection pool refuses
-`rollback(Savepoint)` on a connection enlisted in a transaction, so the savepoint and the
-statement go to the physical connection under it (`Connection.unwrap`), which is the one in the
-transaction. The statements are plain SQL that every database Keycloak supports accepts.
+**Transactions.** Every statement of the extension is plain SQL that every database Keycloak
+supports accepts, run on the request's own connection, in the request's own transaction, isolated
+by a JDBC savepoint (`store/IsolatedStatement`). Per-login and per-user statements carry a 2 second
+query timeout. On PostgreSQL a failed statement aborts the transaction it runs in; rolling back to
+the savepoint undoes only the extension's statement, so a missing, locked or overloaded table
+fails the evaluation open (or skips the learning) while the login carries on. Using the request's
+connection, rather than a transaction of its own, means the extension never takes a second pooled
+connection: under a busy pool a second connection would make every login wait for the pool's
+acquisition timeout. Keycloak's connection pool refuses `rollback(Savepoint)` on a connection
+enlisted in a transaction, so the savepoint and the statement go to the physical connection under
+it (`Connection.unwrap`), which is the one in the transaction; this also holds with XA
+transactions enabled. The query timeout is reset before the statement closes, because H2 applies
+it to the whole session. If a connection ever allows no savepoint, the statements run unisolated
+(as in 0.1.0) and a warning is logged once.
 
-Where the connection allows no savepoint (inside an XA transaction, or a pool without `unwrap`),
-the read and the write fall back to a transaction of their own through JPA
-(`KeycloakModelUtils.runJobInTransaction`), at the cost of a second connection for that moment,
-and deletes run through JPA in the removal's transaction.
-
-The write merges concurrent logins of one user optimistically: it reads the row, merges the
-login, and updates only if `LOGIN_COUNT` and `LAST_LOGIN_AT` are unchanged since the read;
-otherwise it reads the fresh row and merges once more. Two first logins racing on the unique key
-end the same way: the losing insert fails inside its savepoint and is retried as an update. The
-write happens before the login's transaction commits, so a login that rolls back teaches nothing.
+The write runs in the login's transaction, so a login that rolls back teaches nothing. It reads
+the row with a lock (`FOR UPDATE`; a lock hint on SQL Server), so it merges into the latest version
+on every isolation level (MySQL and MariaDB default to repeatable read) and concurrent logins of
+one user queue, then updates only if `LOGIN_COUNT` and `LAST_LOGIN_AT` are unchanged since the read.
+Two first logins racing on the unique key end the same way: the losing insert fails inside its
+savepoint, and the row is read again and merged once more.
 
 **Cleanup.** The entity provider factory listens for `UserModel.UserRemovedEvent` and
 `RealmModel.RealmRemovedEvent` and deletes the matching rows in the removal's transaction, so the
-rows go if and only if the user or realm goes. A missing table means there is nothing to delete
-and never blocks the removal. Any other failure, such as the 2 second timeout on a locked table,
-fails the removal cleanly so the admin can retry it, rather than leaving the profile behind. The
-table itself stays if the extension is removed.
+rows go if and only if the user or realm goes. A user's delete has the 2 second timeout; a realm's
+deletes every profile of the realm and has none, so a realm with millions of profiles can still be
+removed. A missing table means there is nothing to delete and never blocks the removal. Any other
+failure, such as the timeout on a locked table, fails the removal cleanly so the admin can retry
+it, rather than leaving the profile behind. The table itself stays if the extension is removed.
 
 ## Fail open
 
@@ -176,7 +176,7 @@ table itself stays if the extension is removed.
 | Adding event details on parent flow success throws | Warning log; the login continues without re-added details. |
 | Cookie or profile write throws | Warning log; the login, which already succeeded, is unaffected. |
 | Profile table missing on user or realm removal | Warning log; the removal goes ahead. |
-| Profile delete fails otherwise (for example a timeout on a locked table) | The removal fails and can be retried; no profile is left behind. |
+| Profile delete fails otherwise (for example a user's delete timing out on a locked table) | The removal fails and can be retried once the table is free; no profile is left behind. |
 | Micrometer missing or failing | Ignored. |
 
 Every statement of the extension is isolated by a savepoint, so none of these failures can abort
@@ -218,7 +218,8 @@ cookie name.
   deleting a user and a realm with profiles succeeds. On PostgreSQL they also check that a
   missing profile table and a locked one both fail open with a redeemable code, that a user can
   still be deleted while the table is missing, and that a locked table fails a deletion quickly
-  instead of leaving the profile behind. Keycloak runs with a pool of two connections, and two
+  instead of leaving the profile behind, and that a realm with three million profiles can still be
+  deleted. Keycloak runs with a pool of two connections, and two
   concurrent logins must each finish within 3 seconds, which catches any second connection taken
   by the extension; two concurrent first logins of one user must both be learned. CI runs this on Keycloak 26.2.5 and 26.7.4,
   each on both databases.

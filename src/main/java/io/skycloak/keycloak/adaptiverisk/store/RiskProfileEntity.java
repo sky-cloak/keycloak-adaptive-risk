@@ -3,29 +3,17 @@ package io.skycloak.keycloak.adaptiverisk.store;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
-import jakarta.persistence.NamedQueries;
-import jakarta.persistence.NamedQuery;
 import jakarta.persistence.Table;
 
 /**
  * One row per user per realm. The schema is a contract, created by
- * META-INF/skycloak-adaptive-risk-changelog.xml; change it only through a new changeset.
+ * META-INF/skycloak-adaptive-risk-changelog.xml; change it only through a new changeset. The
+ * extension reads and writes it with plain SQL ({@link JpaProfileStore}); the entity declares the
+ * table to Keycloak's persistence unit.
  */
 @Entity(name = "SkycloakAdaptiveRiskProfile")
 @Table(name = "SKYCLOAK_ADAPTIVE_RISK_PROFILE")
-@NamedQueries({
-        @NamedQuery(name = RiskProfileEntity.FIND_BY_USER,
-                query = "select p from SkycloakAdaptiveRiskProfile p where p.realmId = :realmId and p.userId = :userId"),
-        @NamedQuery(name = RiskProfileEntity.DELETE_BY_USER,
-                query = "delete from SkycloakAdaptiveRiskProfile p where p.realmId = :realmId and p.userId = :userId"),
-        @NamedQuery(name = RiskProfileEntity.DELETE_BY_REALM,
-                query = "delete from SkycloakAdaptiveRiskProfile p where p.realmId = :realmId"),
-})
 public class RiskProfileEntity {
-
-    static final String FIND_BY_USER = "skycloakAdaptiveRiskFindByUser";
-    static final String DELETE_BY_USER = "skycloakAdaptiveRiskDeleteByUser";
-    static final String DELETE_BY_REALM = "skycloakAdaptiveRiskDeleteByRealm";
 
     @Id
     @Column(name = "ID", length = 36)

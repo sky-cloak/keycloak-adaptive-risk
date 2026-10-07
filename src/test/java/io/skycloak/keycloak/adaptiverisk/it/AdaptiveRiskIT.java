@@ -169,8 +169,11 @@ class AdaptiveRiskIT {
         } finally {
             pool.shutdownNow();
         }
-        // Every login was learned: the writes did not fail open either.
-        assertEquals(3, admin.eventDetails(realm, admin.userId(realm, "frank"), "LOGIN").size());
+        // Every login was learned: after the three concurrent rounds the profile is no longer learning.
+        Browser.Result fourth = new Browser(baseUrl, HOME_IP, HOME_COUNTRY).login(realm, "frank", "frank-password");
+        assertEquals(Browser.Outcome.LOGGED_IN, fourth.outcome(), () -> describe(fourth));
+        Map<String, String> details = admin.eventDetails(realm, admin.userId(realm, "frank"), "LOGIN").get(0);
+        assertFalse(details.get("risk_reasons").contains("learning"), "three logins learned, got " + details);
     }
 
     @Test
