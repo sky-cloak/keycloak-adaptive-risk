@@ -33,6 +33,11 @@ public final class MaxMindDbReader {
     private static final int DATA_SECTION_SEPARATOR = 16;
     /** Country records nest three levels deep; anything near this is a damaged file. */
     private static final int MAX_DEPTH = 32;
+    /**
+     * Values decoded for one record. A country record has about fifty and a city record a few
+     * hundred; pointers can make a small damaged file expand without bound, so stop well before.
+     */
+    private static final int MAX_VALUES_PER_RECORD = 100_000;
 
     private static final int TYPE_POINTER = 1;
     private static final int TYPE_STRING = 2;
@@ -220,6 +225,7 @@ public final class MaxMindDbReader {
     private final class Decoder {
         private final int base;
         private final int end;
+        private int values;
 
         Decoder(int base, int end) {
             this.base = base;
@@ -229,6 +235,9 @@ public final class MaxMindDbReader {
         Decoded decode(int position, int depth) {
             if (depth > MAX_DEPTH) {
                 throw new InvalidDatabaseException("data nested too deeply");
+            }
+            if (++values > MAX_VALUES_PER_RECORD) {
+                throw new InvalidDatabaseException("record expands to too many values");
             }
             int control = byteAt(position++);
             int type = control >>> 5;
@@ -307,7 +316,8 @@ public final class MaxMindDbReader {
                 case TYPE_MAP -> {
                     // Every pair takes at least two bytes, so a size beyond that is a damaged file.
                     check(position, size * 2L);
-                    Map<String, Object> map = new HashMap<>(Math.max(4, size * 2));
+                    // Sized from the data only up to a bound: the size byte is untrusted.
+                    Map<String, Object> map = new HashMap<>(Math.min(size, 64) * 2);
                     for (int i = 0; i < size; i++) {
                         Decoded key = decode(position, depth + 1);
                         if (!(key.value instanceof String k)) {

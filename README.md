@@ -67,8 +67,8 @@ these that answers, and skips both reasons when none does:
    The same trust rule as for the IP header applies: the proxy must overwrite any value the
    client sent.
 2. **A GeoIP database file** (`SKYCLOAK_ADAPTIVE_RISK_GEOIP_DATABASE`), looked up with the client
-   address the extension uses for the network. Any country or city database in the MaxMind DB
-   format works, for example [DB-IP IP to Country Lite](https://db-ip.com/db/download/ip-to-country-lite)
+   address the extension uses for the network. Any country database in the MaxMind DB format
+   works (city databases too, up to 128 MB), for example [DB-IP IP to Country Lite](https://db-ip.com/db/download/ip-to-country-lite)
    (free, CC BY 4.0, which requires attribution) or
    [MaxMind GeoLite2 Country](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data)
    (free account). The extension ships no database: you download it and keep it current under
@@ -76,16 +76,19 @@ these that answers, and skips both reasons when none does:
 
 ```bash
 docker run ... \
-  -v /srv/geoip/country.mmdb:/opt/keycloak/conf/country.mmdb:ro \
-  -e SKYCLOAK_ADAPTIVE_RISK_GEOIP_DATABASE=/opt/keycloak/conf/country.mmdb \
+  -v /srv/geoip:/opt/keycloak/geoip:ro \
+  -e SKYCLOAK_ADAPTIVE_RISK_GEOIP_DATABASE=/opt/keycloak/geoip/country.mmdb \
   quay.io/keycloak/keycloak:26.2.5 start ...
 ```
 
-The file must be readable by the user Keycloak runs as. It is read into memory at startup and
-again when its modification time changes, checked at most once a minute, so replacing it with a
-newer release needs no restart. A missing or damaged file never fails a login: country lookups
-are off (or keep using the last good file) and Keycloak's log says why. Placeholder codes such as
-`XX` and `ZZ` count as unknown.
+The file must be readable by the user Keycloak runs as. It is read into memory at startup; after
+that the extension checks at most once a minute whether it changed and, if so, reads it again in
+the background, so updating it needs no restart. **Update it by writing the new release next to
+it and renaming it into place** (`mv country.mmdb.new country.mmdb`), never by overwriting it in
+place, and mount the directory rather than the single file: a single-file mount keeps showing the
+old file after a rename. A missing or damaged file never fails a login: country lookups are off
+(or keep using the last good file) and Keycloak's log says why. Placeholder codes such as `XX`,
+`ZZ`, `EU` and `AP` count as unknown.
 
 **Running on Skycloak:** on [Skycloak](https://skycloak.io)'s managed Keycloak, install Adaptive
 Risk from the extension marketplace; the client IP and country header settings come pre-filled.
@@ -170,8 +173,8 @@ The condition does not match, and logs a warning, when no evaluation ran earlier
 |---|---|
 | `new_device` | The browser has no device cookie, or its device is unknown for this user. |
 | `new_network` | The IPv4 /24 or IPv6 /48 has never been seen for this user. |
-| `new_country` | The country has never been seen for this user. Needs the country header, and a profile that already holds at least one country. |
-| `rapid_country_change` | The country differs from the one of the last successful login, and that login was less than 2 hours ago. Needs the country header. |
+| `new_country` | The country has never been seen for this user. Needs a country (header or GeoIP database), and a profile that already holds at least one country. |
+| `rapid_country_change` | The country differs from the one of the last successful login, and that login was less than 2 hours ago. Needs a country (header or GeoIP database). |
 | `recent_failures` | Keycloak's brute force record shows 3 or more failed attempts, the last one within the hour. Needs **brute force detection** on in the realm; skipped otherwise. |
 | `unusual_hour` | No past successful login at this UTC hour or the hour on either side. |
 | `learning` | The user has fewer successful logins than `learning-logins`. History reasons (all of the above except `recent_failures`) do not fire, and the score is the learning score plus `recent_failures`. |
@@ -187,7 +190,7 @@ when the login is refused in the step that evaluated it (for example by Deny acc
 | `risk_score` | `45` | 0 to 100. |
 | `risk_level` | `medium` | `low`, `medium` or `high`. |
 | `risk_reasons` | `new_device,new_network` | Comma-separated reason codes, or `none`. |
-| `risk_country` | `CA` | Present only when the country header gave one. |
+| `risk_country` | `CA` | Present only when the country is known, from the header or the GeoIP database. |
 
 No username, email, IP address or device ID is added to events or logs by the extension.
 Turn on **Save events** in the realm's event settings to see them under **Events**, or ship

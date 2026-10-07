@@ -197,13 +197,20 @@ decodes the record into plain Java values, with every offset bounds checked, so 
 raises an error instead of reading outside the file. It supports record sizes 24, 28 and 32 and
 IPv4 and IPv6 trees; IPv4 addresses are looked up under `::/96` in an IPv6 tree.
 
-`GeoIpCountry` reads `country.iso_code` (the MaxMind and DB-IP layout) or a top-level
-`country_code` (a flat layout some other providers use). It holds the whole file in memory
-(country databases are under 20 MB; files over 512 MB are refused), and checks the file's
-modification time at most once a minute, loading a changed file and swapping it in only once it
-parsed. A missing, unreadable or damaged file turns lookups off, or keeps the last good file,
-with one warning per distinct file version. A lookup error gives no country, never
-`evaluation_error`: the country reasons are skipped, the rest of the score stands.
+`GeoIpCountry` reads `country.iso_code` (the MaxMind and DB-IP layout), or a top-level `country`
+string or `country_code` (flat layouts other providers use). It holds the whole file in memory
+(country databases are under 20 MB; files over 128 MB are refused, so two copies fit on the heap
+during a reload). The file is read synchronously at startup. After that, a lookup checks at most
+once a minute (on a monotonic clock) whether the file's modification time or size changed and, if
+so, hands the reload to a single background thread, so a slow or hung file system never blocks a
+login; the new copy is swapped in only once it parsed. Modification time and size together
+identify a version, so a copy finishing within the same second as a failed read of it is still
+picked up. A missing, unreadable or damaged file turns lookups off, or keeps the last good file,
+with one warning per occurrence; a file that parses but fails on lookup logs one warning per
+version. A lookup error, including an out-of-memory or stack overflow from a hostile file, gives
+no country, never `evaluation_error`: the country reasons are skipped, the rest of the score
+stands. The reader also caps the values one record may expand to (pointers can make a small
+damaged file expand without bound) and never preallocates from a size it read from the file.
 
 The header wins whenever the request carries a usable one, so an edge that knows the country
 better than a database is never second-guessed.

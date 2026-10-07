@@ -8,8 +8,11 @@ import java.util.regex.Pattern;
 public final class Countries {
 
     private static final Pattern COUNTRY = Pattern.compile("[A-Z][A-Z0-9]");
-    /** Codes sources use for an unknown country: XX (Cloudflare and others) and ZZ (ISO user-assigned). */
-    private static final Set<String> UNKNOWN = Set.of("XX", "ZZ");
+    /**
+     * Codes sources use for an unknown or non-country location: XX (Cloudflare and others), ZZ (ISO
+     * user-assigned), and the legacy EU, AP, A1, A2 and O1 of older GeoIP databases.
+     */
+    private static final Set<String> UNKNOWN = Set.of("XX", "ZZ", "EU", "AP", "A1", "A2", "O1");
 
     private Countries() {
     }

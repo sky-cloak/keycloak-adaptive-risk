@@ -16,6 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MaxMindDbReaderTest {
 
@@ -182,6 +183,46 @@ class MaxMindDbReaderTest {
         data.raw((byte) (2 << 5 | 31), (byte) 0xFF, (byte) 0xFF, (byte) 0xFF); // a 16 MB string in 4 bytes
 
         assertThrows(MaxMindDbReader.InvalidDatabaseException.class, () -> MaxMindDbReader.decodeForTest(data.bytes(), 0));
+    }
+
+    @Test
+    void aHugeMapSizeInALargeFileIsRejectedWithoutPreallocating() {
+        // A map claiming 16 million pairs in a data section big enough to pass the size check.
+        byte[] data = new byte[40 * 1024 * 1024];
+        data[0] = (byte) (7 << 5 | 31);
+        data[1] = (byte) 0xFF;
+        data[2] = (byte) 0xFF;
+        data[3] = (byte) 0xFF;
+        // The first "key" is a uint32, not a string.
+        data[4] = (byte) (6 << 5);
+
+        assertThrows(MaxMindDbReader.InvalidDatabaseException.class, () -> MaxMindDbReader.decodeForTest(data, 0));
+    }
+
+    @Test
+    void aPointerFanOutBombIsRejectedQuickly() {
+        // Fifteen levels of maps, each with eight keys pointing at the next level: 8^15 values if
+        // decoded naively, from a few hundred bytes.
+        int levels = 15;
+        int[] offsets = new int[levels + 1];
+        MmdbWriter.Encoder data = new MmdbWriter.Encoder(false);
+        for (int level = levels; level >= 0; level--) {
+            offsets[level] = data.size();
+            if (level == levels) {
+                data.encode("leaf");
+                continue;
+            }
+            data.raw((byte) (7 << 5 | 8));
+            for (char key = 'a'; key < 'a' + 8; key++) {
+                data.encode(String.valueOf(key));
+                data.pointer(offsets[level + 1]);
+            }
+        }
+        long started = System.nanoTime();
+
+        assertThrows(MaxMindDbReader.InvalidDatabaseException.class,
+                () -> MaxMindDbReader.decodeForTest(data.bytes(), offsets[0]));
+        assertTrue(System.nanoTime() - started < 5_000_000_000L, "took too long to give up");
     }
 
     private static int indexOfMarker(byte[] file) {
