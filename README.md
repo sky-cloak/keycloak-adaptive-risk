@@ -68,8 +68,8 @@ these that answers, and skips both reasons when none does:
    client sent.
 2. **A GeoIP database file** (`SKYCLOAK_ADAPTIVE_RISK_GEOIP_DATABASE`), looked up with the client
    address the extension uses for the network. Any country database in the MaxMind DB format
-   works, and city databases up to 128 MB (GeoLite2 City fits; DB-IP City Lite is larger and
-   is refused), for example [DB-IP IP to Country Lite](https://db-ip.com/db/download/ip-to-country-lite)
+   works, and city databases up to 128 MiB (GeoLite2 City, about 60 MB, fits; DB-IP City Lite,
+   about 127 MB, fits with little headroom), for example [DB-IP IP to Country Lite](https://db-ip.com/db/download/ip-to-country-lite)
    (free, CC BY 4.0, which requires attribution) or
    [MaxMind GeoLite2 Country](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data)
    (free account). The extension ships no database: you download it and keep it current under

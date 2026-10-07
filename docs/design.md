@@ -210,7 +210,8 @@ with one warning per occurrence; a file that parses but fails on lookup logs one
 version. A lookup error, including an out-of-memory or stack overflow from a hostile file, gives
 no country, never `evaluation_error`: the country reasons are skipped, the rest of the score
 stands. The reader also caps the values one record may expand to (pointers can make a small
-damaged file expand without bound) and never preallocates from a size it read from the file.
+damaged file expand without bound) and preallocates at most 128 map slots, whatever size the
+file claims.
 
 The header wins whenever the request carries a usable one, so an edge that knows the country
 better than a database is never second-guessed.

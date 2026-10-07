@@ -167,6 +167,16 @@ class MaxMindDbReaderTest {
     }
 
     @Test
+    void aMapThatPointsAtItselfIsRejected() {
+        MmdbWriter.Encoder data = new MmdbWriter.Encoder(false);
+        data.raw((byte) (7 << 5 | 1)); // a map of one pair at offset 0
+        data.encode("self");
+        data.pointer(0);
+
+        assertThrows(MaxMindDbReader.InvalidDatabaseException.class, () -> MaxMindDbReader.decodeForTest(data.bytes(), 0));
+    }
+
+    @Test
     void deeplyNestedDataIsRejected() {
         MmdbWriter.Encoder data = new MmdbWriter.Encoder(false);
         for (int i = 0; i < 200; i++) {
