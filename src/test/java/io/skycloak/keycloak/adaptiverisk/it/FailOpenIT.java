@@ -125,6 +125,11 @@ class FailOpenIT {
         admin.deleteUser(realm, userId);
     }
 
+    /**
+     * Three million rows because a realm delete must have no statement timeout, and on a fast
+     * machine one million rows delete in about a second: smaller would not catch a timeout coming
+     * back. Costs about a minute.
+     */
     @Test
     void aRealmWithMillionsOfProfilesCanStillBeDeleted() throws Exception {
         String big = "adaptive-big-" + UUID.randomUUID().toString().substring(0, 8);

@@ -23,7 +23,10 @@ final class IsolatedStatement {
         FAILED
     }
 
-    /** @param isolated whether a savepoint protected the statement */
+    /**
+     * @param isolated whether the transaction around the statement is intact: a savepoint protected
+     *                 it (and, on failure, the rollback to it worked), or it ran in auto-commit mode
+     */
     record Outcome<T>(Status status, T value, SQLException error, boolean isolated) {
     }
 
@@ -48,7 +51,12 @@ final class IsolatedStatement {
      */
     static <T> Outcome<T> run(Connection pooled, String sql, int timeoutSeconds, Binder binder, Executor<T> executor) {
         Connection connection = physical(pooled);
-        Savepoint savepoint = savepoint(connection);
+        // Without the physical connection, a pool wrapper may accept setSavepoint yet refuse
+        // rollback(Savepoint) while enlisted, so no savepoint is taken.
+        Savepoint savepoint = connection != null ? savepoint(connection) : null;
+        if (connection == null) {
+            connection = pooled;
+        }
         boolean isolated = savepoint != null || autoCommit(connection);
         try {
             T value;
@@ -69,8 +77,8 @@ final class IsolatedStatement {
             release(connection, savepoint);
             return new Outcome<>(Status.OK, value, null, isolated);
         } catch (SQLException e) {
-            rollback(connection, savepoint, e);
-            return new Outcome<>(Status.FAILED, null, e, isolated);
+            boolean intact = rollback(connection, savepoint, e) && isolated;
+            return new Outcome<>(Status.FAILED, null, e, intact);
         } catch (RuntimeException e) {
             rollback(connection, savepoint, e);
             throw e;
@@ -82,12 +90,12 @@ final class IsolatedStatement {
      * transaction, so the savepoint and the statement go to the physical connection under it,
      * which is the one in the transaction.
      */
+    /** @return the physical connection, or null when the pool cannot hand it out */
     private static Connection physical(Connection pooled) {
         try {
-            Connection unwrapped = pooled.unwrap(Connection.class);
-            return unwrapped != null ? unwrapped : pooled;
+            return pooled.unwrap(Connection.class);
         } catch (SQLException | RuntimeException e) {
-            return pooled;
+            return null;
         }
     }
 
@@ -132,14 +140,20 @@ final class IsolatedStatement {
         }
     }
 
-    private static void rollback(Connection connection, Savepoint savepoint, Exception cause) {
+    /**
+     * @return false when the rollback to the savepoint failed: the database may have rolled back
+     *         the whole transaction (InnoDB does after a deadlock), so it is no longer intact
+     */
+    private static boolean rollback(Connection connection, Savepoint savepoint, Exception cause) {
         if (savepoint == null) {
-            return;
+            return true;
         }
         try {
             connection.rollback(savepoint);
+            return true;
         } catch (SQLException rollback) {
             cause.addSuppressed(rollback);
+            return false;
         }
     }
 

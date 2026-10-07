@@ -34,7 +34,7 @@ public final class JpaProfileStore {
     private static final String WHERE_USER = " WHERE REALM_ID = ? AND USER_ID = ?";
     private static final String INSERT = "INSERT INTO " + TABLE
             + " (ID, REALM_ID, USER_ID, LOGIN_COUNT, LAST_LOGIN_AT, HISTORY) VALUES (?, ?, ?, ?, ?, ?)";
-    /** Applies only if the row is unchanged since it was read. */
+    /** The row is locked by the read before it; the guard on the old values is belt and braces. */
     private static final String UPDATE = "UPDATE " + TABLE + " SET LOGIN_COUNT = ?, LAST_LOGIN_AT = ?, HISTORY = ?"
             + WHERE_USER + " AND LOGIN_COUNT = ? AND LAST_LOGIN_AT = ?";
     private static final String DELETE_USER = "DELETE FROM " + TABLE + WHERE_USER;
@@ -42,10 +42,22 @@ public final class JpaProfileStore {
 
     private static final Logger log = Logger.getLogger(JpaProfileStore.class);
 
-    /** A profile statement failed. When it was isolated, the transaction it ran in is intact. */
+    /** A profile statement failed. */
     public static final class ProfileStoreException extends RuntimeException {
-        ProfileStoreException(String message, Throwable cause) {
-            super(message, cause);
+        private final boolean transactionIntact;
+
+        ProfileStoreException(String message, IsolatedStatement.Outcome<?> outcome) {
+            super(message, outcome.error());
+            this.transactionIntact = outcome.isolated();
+        }
+
+        /**
+         * False when the failure may have broken the request's transaction (no savepoint, or the
+         * rollback to it failed). The caller must then mark the transaction rollback-only rather
+         * than let the rest of the request run on it.
+         */
+        public boolean transactionIntact() {
+            return transactionIntact;
         }
     }
 
@@ -76,60 +88,72 @@ public final class JpaProfileStore {
         IsolatedStatement.Outcome<Stored> read = session().doReturningWork(connection ->
                 read(connection, SELECT + WHERE_USER, realmId, userId));
         if (read.status() == IsolatedStatement.Status.FAILED) {
-            throw new ProfileStoreException("profile read failed", read.error());
+            throw new ProfileStoreException("profile read failed", read);
         }
         return read.value() == null ? new RiskProfile() : read.value().profile();
     }
 
     /**
      * Learns one successful login, in the login's own transaction, so a login that rolls back
-     * teaches nothing. The read locks the row, so it returns the latest version on every isolation
-     * level and concurrent logins of one user queue. The update applies only if the row is
-     * unchanged since the read; if a concurrent first login created the row first (the insert
-     * fails on the unique key), the row is read again and merged once more.
+     * teaches nothing. A user's first login inserts the row. A later login reads the row with a lock
+     * (a record lock: a missing row is never locked, which on InnoDB would take a gap lock that
+     * deadlocks two concurrent first logins), so it merges into the latest version on every
+     * isolation level, and updates it. When two first logins race, the losing insert fails on the
+     * unique key and that login is not learned; retrying after a duplicate key could deadlock on
+     * InnoDB, and one learning login is a small price.
      *
      * @throws ProfileStoreException when the write failed
      */
     public void recordSuccess(String realmId, String userId, LoginSignals login, Duration retention) {
         Session session = session();
-        for (int attempt = 0; attempt < 2; attempt++) {
-            IsolatedStatement.Outcome<Stored> read = session.doReturningWork(connection ->
-                    read(connection, lockingSelect(productName(connection)), realmId, userId));
-            if (read.status() == IsolatedStatement.Status.FAILED) {
-                throw new ProfileStoreException("profile read failed", read.error());
-            }
-            Stored stored = read.value();
-            RiskProfile profile = stored == null ? new RiskProfile() : stored.profile();
+        IsolatedStatement.Outcome<Stored> exists = session.doReturningWork(connection ->
+                read(connection, SELECT + WHERE_USER, realmId, userId));
+        if (exists.status() == IsolatedStatement.Status.FAILED) {
+            throw new ProfileStoreException("profile read failed", exists);
+        }
+        if (exists.value() == null) {
+            RiskProfile profile = new RiskProfile();
             profile.recordSuccess(login, retention);
-
-            IsolatedStatement.Outcome<Integer> written = session.doReturningWork(connection -> stored == null
-                    ? IsolatedStatement.run(connection, INSERT, QUERY_TIMEOUT_SECONDS, statement -> {
+            IsolatedStatement.Outcome<Integer> inserted = session.doReturningWork(connection ->
+                    IsolatedStatement.run(connection, INSERT, QUERY_TIMEOUT_SECONDS, statement -> {
                         statement.setString(1, KeycloakModelUtils.generateId());
                         statement.setString(2, realmId);
                         statement.setString(3, userId);
                         statement.setInt(4, profile.loginCount());
                         statement.setLong(5, profile.lastLoginAt());
                         statement.setString(6, profile.historyJson());
-                    }, PreparedStatement::executeUpdate)
-                    : IsolatedStatement.run(connection, UPDATE, QUERY_TIMEOUT_SECONDS, statement -> {
-                        statement.setInt(1, profile.loginCount());
-                        statement.setLong(2, profile.lastLoginAt());
-                        statement.setString(3, profile.historyJson());
-                        statement.setString(4, realmId);
-                        statement.setString(5, userId);
-                        statement.setInt(6, stored.loginCount());
-                        statement.setLong(7, stored.lastLoginAt());
                     }, PreparedStatement::executeUpdate));
-            if (written.status() == IsolatedStatement.Status.OK && written.value() == 1) {
-                return;
+            if (inserted.status() == IsolatedStatement.Status.FAILED) {
+                throw new ProfileStoreException("profile insert failed (a concurrent first login may have won)", inserted);
             }
-            if (written.status() == IsolatedStatement.Status.FAILED && (stored != null || !written.isolated())) {
-                throw new ProfileStoreException("profile write failed", written.error());
-            }
-            // The insert lost a race with a concurrent first login, or the row changed after the
-            // read: read again and merge.
+            return;
         }
-        throw new ProfileStoreException("profile kept changing concurrently", null);
+
+        IsolatedStatement.Outcome<Stored> locked = session.doReturningWork(connection ->
+                read(connection, lockingSelect(productName(connection)), realmId, userId));
+        if (locked.status() == IsolatedStatement.Status.FAILED) {
+            throw new ProfileStoreException("profile read failed", locked);
+        }
+        Stored stored = locked.value();
+        if (stored == null) {
+            // Deleted since the first read, with its user: nothing to learn into.
+            return;
+        }
+        RiskProfile profile = stored.profile();
+        profile.recordSuccess(login, retention);
+        IsolatedStatement.Outcome<Integer> updated = session.doReturningWork(connection ->
+                IsolatedStatement.run(connection, UPDATE, QUERY_TIMEOUT_SECONDS, statement -> {
+                    statement.setInt(1, profile.loginCount());
+                    statement.setLong(2, profile.lastLoginAt());
+                    statement.setString(3, profile.historyJson());
+                    statement.setString(4, realmId);
+                    statement.setString(5, userId);
+                    statement.setInt(6, stored.loginCount());
+                    statement.setLong(7, stored.lastLoginAt());
+                }, PreparedStatement::executeUpdate));
+        if (updated.status() == IsolatedStatement.Status.FAILED) {
+            throw new ProfileStoreException("profile update failed", updated);
+        }
     }
 
     /** Deletes a removed user's profile in the removal's transaction. See {@link #delete}. */
@@ -163,7 +187,7 @@ public final class JpaProfileStore {
             log.warnf("Adaptive risk profile table %s is missing; nothing to delete", TABLE);
             return 0;
         }
-        throw new ProfileStoreException("profile delete failed", outcome.error());
+        throw new ProfileStoreException("profile delete failed", outcome);
     }
 
     /**

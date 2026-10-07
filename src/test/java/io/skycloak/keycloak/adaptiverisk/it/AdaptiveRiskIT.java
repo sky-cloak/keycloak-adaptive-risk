@@ -177,13 +177,13 @@ class AdaptiveRiskIT {
     }
 
     @Test
-    void concurrentFirstLoginsOfOneUserAreBothLearned() throws Exception {
+    void concurrentFirstLoginsOfOneUserBothSucceed() throws Exception {
         String user = "dave";
         admin.createUser(realm, user, user + "-password");
-        ExecutorService pool = Executors.newFixedThreadPool(2);
+        ExecutorService pool = Executors.newFixedThreadPool(4);
         try {
             List<Future<Browser.Result>> logins = new ArrayList<>();
-            for (int i = 0; i < 2; i++) {
+            for (int i = 0; i < 4; i++) {
                 logins.add(pool.submit(() -> new Browser(baseUrl, HOME_IP, HOME_COUNTRY).login(realm, user, user + "-password")));
             }
             for (Future<Browser.Result> login : logins) {
@@ -193,14 +193,17 @@ class AdaptiveRiskIT {
         } finally {
             pool.shutdownNow();
         }
-        // Racing on the unique key, one insert loses and is merged as an update: two learning logins
-        // counted, so the third is the last one still learning.
-        Browser third = new Browser(baseUrl, HOME_IP, HOME_COUNTRY);
-        assertEquals(Browser.Outcome.LOGGED_IN, third.login(realm, user, user + "-password").outcome());
-        third.forgetSession();
-        assertEquals(Browser.Outcome.LOGGED_IN, third.login(realm, user, user + "-password").outcome());
-        Map<String, String> fourth = admin.eventDetails(realm, admin.userId(realm, user), "LOGIN").get(0);
-        assertFalse(fourth.get("risk_reasons").contains("learning"), "four logins learned, got " + fourth);
+        // The racing first logins created one profile; the logins that lost the insert are simply
+        // not learned. Three more logins finish the learning.
+        Browser browser = new Browser(baseUrl, HOME_IP, HOME_COUNTRY);
+        for (int i = 0; i < 3; i++) {
+            assertEquals(Browser.Outcome.LOGGED_IN, browser.login(realm, user, user + "-password").outcome());
+            browser.forgetSession();
+        }
+        Browser.Result last = browser.login(realm, user, user + "-password");
+        assertEquals(Browser.Outcome.LOGGED_IN, last.outcome(), () -> describe(last));
+        Map<String, String> details = admin.eventDetails(realm, admin.userId(realm, user), "LOGIN").get(0);
+        assertFalse(details.get("risk_reasons").contains("learning"), "learned by now, got " + details);
     }
 
     @Test

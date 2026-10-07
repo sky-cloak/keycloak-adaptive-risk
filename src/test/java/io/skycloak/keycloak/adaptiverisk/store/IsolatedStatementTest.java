@@ -164,8 +164,32 @@ class IsolatedStatementTest {
 
         IsolatedStatement.Outcome<Integer> outcome = run(pooled);
 
+        // A pool wrapper may accept setSavepoint yet refuse rollback(Savepoint) while enlisted, so
+        // without the physical connection no savepoint is taken and the outcome says so.
         assertEquals(IsolatedStatement.Status.OK, outcome.status());
-        assertTrue(outcome.isolated());
+        assertFalse(outcome.isolated());
+        assertFalse(calls.contains("savepoint"), calls.toString());
+    }
+
+    @Test
+    void aFailedRollbackToTheSavepointReportsTheTransactionAsNotIntact() {
+        Connection physical = connection(false, null, new SQLException("Deadlock found", "40001"), null);
+        Connection refusing = (Connection) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class},
+                (p, m, a) -> {
+                    if (m.getName().equals("unwrap")) {
+                        return p;
+                    }
+                    if (m.getName().equals("rollback")) {
+                        // What InnoDB does after a deadlock: the whole transaction is gone, savepoints with it.
+                        throw new SQLException("SAVEPOINT does not exist", "42000");
+                    }
+                    return m.invoke(physical, a);
+                });
+
+        IsolatedStatement.Outcome<Integer> outcome = run(refusing);
+
+        assertEquals(IsolatedStatement.Status.FAILED, outcome.status());
+        assertFalse(outcome.isolated());
     }
 
     @Test

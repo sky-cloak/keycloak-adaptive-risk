@@ -105,7 +105,24 @@ public class AdaptiveRiskAuthenticator implements AuthenticationFlowCallback {
 
     /** Reads the profile on the login's own connection, isolated by a savepoint (see {@link JpaProfileStore#load}). */
     private RiskProfile loadProfile(String realmId, String userId) {
-        return JpaProfileStore.of(session).load(realmId, userId);
+        try {
+            return JpaProfileStore.of(session).load(realmId, userId);
+        } catch (JpaProfileStore.ProfileStoreException e) {
+            failTransactionIfBroken(e);
+            throw e;
+        }
+    }
+
+    /**
+     * A failure that may have broken the request's transaction (the database rolled it back, or no
+     * savepoint protected the statement) must not let the rest of the request run on it.
+     */
+    private void failTransactionIfBroken(JpaProfileStore.ProfileStoreException e) {
+        if (!e.transactionIntact()) {
+            log.warnf("Adaptive risk: a profile statement failed and the request's transaction may be broken; "
+                    + "marking it for rollback: %s", e.getCause());
+            session.getTransactionManager().setRollbackOnly();
+        }
     }
 
     /** Keycloak writes failure records only when brute force detection is on; null means skip the reason. */
@@ -164,11 +181,16 @@ public class AdaptiveRiskAuthenticator implements AuthenticationFlowCallback {
             String realmId = realm.getId();
             String userId = user.getId();
             // On the login's own connection and in its transaction, isolated by savepoints: a failed
-            // write never fails the login, and no second pooled connection is taken.
-            JpaProfileStore.of(session).recordSuccess(realmId, userId, login, retention);
+            // write skips the learning without failing the login, and no second pooled connection
+            // is taken.
+            try {
+                JpaProfileStore.of(session).recordSuccess(realmId, userId, login, retention);
+            } catch (JpaProfileStore.ProfileStoreException e) {
+                failTransactionIfBroken(e);
+                throw e;
+            }
         } catch (Throwable t) {
-            log.warnf("Adaptive risk could not record a successful login; the login is unaffected: %s",
-                    t.getClass().getName());
+            log.warnf("Adaptive risk could not record a successful login: %s", t.getClass().getName());
         }
     }
 

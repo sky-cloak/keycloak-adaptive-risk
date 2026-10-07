@@ -152,18 +152,30 @@ transactions enabled. The query timeout is reset before the statement closes, be
 it to the whole session. If a connection ever allows no savepoint, the statements run unisolated
 (as in 0.1.0) and a warning is logged once.
 
-The write runs in the login's transaction, so a login that rolls back teaches nothing. It reads
-the row with a lock (`FOR UPDATE`; a lock hint on SQL Server), so it merges into the latest version
-on every isolation level (MySQL and MariaDB default to repeatable read) and concurrent logins of
-one user queue, then updates only if `LOGIN_COUNT` and `LAST_LOGIN_AT` are unchanged since the read.
-Two first logins racing on the unique key end the same way: the losing insert fails inside its
-savepoint, and the row is read again and merged once more.
+The write runs in the login's transaction, so a login that rolls back teaches nothing. A user's
+first login inserts the row. A later login reads the row with a lock (`FOR UPDATE`; a lock hint on
+SQL Server), so it merges into the latest version on every isolation level (MySQL and MariaDB
+default to repeatable read) and concurrent logins of one user queue, then updates it. A missing
+row is never locked: on InnoDB that takes a gap lock, and two concurrent first logins holding gap
+locks deadlock on insert. When two first logins race, the losing insert fails on the unique key
+inside its savepoint and that login is simply not learned; re-reading after a duplicate key could
+deadlock on InnoDB, and one learning login is a small price.
+
+The row lock lasts until the login's transaction commits, a few milliseconds later. If something
+later in the same request wrote a row referencing the user while an admin deleted that user, the
+two could deadlock and the database would cancel one side; the user being deleted mid-login is
+the only way to get there.
+
+If a database ever rolls back the whole transaction instead of the statement (InnoDB does after a
+deadlock), the rollback to the savepoint fails. The extension then marks the request's transaction
+rollback-only, so the request fails instead of carrying on half undone.
 
 **Cleanup.** The entity provider factory listens for `UserModel.UserRemovedEvent` and
 `RealmModel.RealmRemovedEvent` and deletes the matching rows in the removal's transaction, so the
 rows go if and only if the user or realm goes. A user's delete has the 2 second timeout; a realm's
 deletes every profile of the realm and has none, so a realm with millions of profiles can still be
-removed. A missing table means there is nothing to delete and never blocks the removal. Any other
+removed. The price: a realm removal waits on a locked profile table (a long admin transaction, a
+table rewrite) until the lock goes or Keycloak's transaction timeout ends it. A missing table means there is nothing to delete and never blocks the removal. Any other
 failure, such as the timeout on a locked table, fails the removal cleanly so the admin can retry
 it, rather than leaving the profile behind. The table itself stays if the extension is removed.
 
@@ -221,5 +233,5 @@ cookie name.
   instead of leaving the profile behind, and that a realm with three million profiles can still be
   deleted. Keycloak runs with a pool of two connections, and two
   concurrent logins must each finish within 3 seconds, which catches any second connection taken
-  by the extension; two concurrent first logins of one user must both be learned. CI runs this on Keycloak 26.2.5 and 26.7.4,
+  by the extension; four concurrent first logins of one user must all succeed. CI runs this on Keycloak 26.2.5 and 26.7.4,
   each on both databases.
