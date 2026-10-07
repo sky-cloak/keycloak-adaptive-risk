@@ -47,6 +47,56 @@
           "credentialData": "{\"subType\":\"totp\",\"digits\":6,\"period\":30,\"algorithm\":\"HmacSHA1\",\"counter\":0}"
         }
       ]
+    },
+    {
+      "username": "carol",
+      "enabled": true,
+      "email": "carol@example.com",
+      "emailVerified": true,
+      "firstName": "Carol",
+      "lastName": "Example",
+      "credentials": [
+        {"type": "password", "value": "carol-password"}
+      ]
+    },
+    {
+      "username": "erin",
+      "enabled": true,
+      "email": "erin@example.com",
+      "emailVerified": true,
+      "firstName": "Erin",
+      "lastName": "Example",
+      "credentials": [
+        {"type": "password", "value": "erin-password"},
+        {
+          "type": "otp",
+          "userLabel": "phone",
+          "secretData": "{\"value\":\"JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP\"}",
+          "credentialData": "{\"subType\":\"totp\",\"digits\":6,\"period\":30,\"algorithm\":\"HmacSHA1\",\"counter\":0}"
+        }
+      ]
+    },
+    {
+      "username": "frank",
+      "enabled": true,
+      "email": "frank@example.com",
+      "emailVerified": true,
+      "firstName": "Frank",
+      "lastName": "Example",
+      "credentials": [
+        {"type": "password", "value": "frank-password"}
+      ]
+    },
+    {
+      "username": "grace",
+      "enabled": true,
+      "email": "grace@example.com",
+      "emailVerified": true,
+      "firstName": "Grace",
+      "lastName": "Example",
+      "credentials": [
+        {"type": "password", "value": "grace-password"}
+      ]
     }
   ],
   "authenticatorConfig": [

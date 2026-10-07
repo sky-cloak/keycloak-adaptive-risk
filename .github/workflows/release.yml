@@ -61,7 +61,7 @@ jobs:
             echo
             echo "## Keycloak compatibility"
             echo
-            echo "Keycloak 26.2 and later 26.x. Tested in CI on 26.2.5 and 26.7.4."
+            echo "Keycloak 26.2 and later 26.x. Tested in CI on 26.2.5 and 26.7.4, on PostgreSQL and the embedded database."
             echo
             if [[ -n "$PREV_TAG" ]]; then
               echo "## Changes since ${PREV_TAG}"

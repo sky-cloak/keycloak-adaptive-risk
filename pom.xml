@@ -6,7 +6,7 @@
 
     <groupId>io.skycloak.keycloak</groupId>
     <artifactId>keycloak-adaptive-risk</artifactId>
-    <version>0.1.0</version>
+    <version>0.1.1</version>
     <packaging>jar</packaging>
 
     <name>Keycloak Adaptive Risk</name>
@@ -28,6 +28,8 @@
         <keycloak.version>26.2.5</keycloak.version>
         <!-- Keycloak image the integration tests boot. CI runs the oldest and the newest 26.x. -->
         <keycloak.image.version>${keycloak.version}</keycloak.image.version>
+        <!-- Database of the integration test Keycloak: postgres, or dev-file for the embedded one. -->
+        <keycloak.db>postgres</keycloak.db>
 
         <jakarta.ws.rs.version>3.1.0</jakarta.ws.rs.version>
         <junit.version>5.10.2</junit.version>
@@ -134,6 +136,7 @@
                 <configuration>
                     <systemPropertyVariables>
                         <keycloak.image.version>${keycloak.image.version}</keycloak.image.version>
+                        <keycloak.db>${keycloak.db}</keycloak.db>
                         <adaptive.risk.jar>${project.build.directory}/${project.build.finalName}.jar</adaptive.risk.jar>
                     </systemPropertyVariables>
                 </configuration>

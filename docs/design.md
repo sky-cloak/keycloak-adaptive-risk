@@ -12,7 +12,7 @@ in the [README](../README.md).
 | Condition | `RiskLevelCondition` (`skycloak-adaptive-risk-condition`) | Matches the stored level against its configured level, at least or exactly. |
 | Scorer | `RiskScorer` | Pure function: settings, profile and login signals in, score, level and reasons out. |
 | Profile | `RiskProfile` | One user's bounded history, with recording, aging and eviction. |
-| Storage | `RiskProfileEntity`, `JpaProfileStore`, `RiskProfileEntityProviderFactory` | JPA entity, Liquibase changelog, reads, writes, and cleanup on user and realm removal. |
+| Storage | `RiskProfileEntity`, `JpaProfileStore`, `IsolatedStatement`, `RiskProfileEntityProviderFactory` | Table declaration and Liquibase changelog, savepoint-isolated SQL reads and writes, and cleanup on user and realm removal. |
 | Request signals | `TrustedHeaders`, `Networks`, `DeviceCookie` | Client address and country from the trusted headers, network prefix, device cookie. |
 | Metric | `RiskMetrics` | `skycloak_adaptive_risk_evaluations{level, outcome, realm}`. |
 
@@ -137,32 +137,70 @@ Each write refreshes the entries the login touched, drops entries unseen for the
 a long absence is still compared with their old history once, and the successful login then
 replaces it.
 
-**Transactions.** The read uses the request's own entity manager: it is one indexed select.
-The write runs in its own transaction (`KeycloakModelUtils.runJobInTransaction`, which
-suspends the request's JTA transaction), so a failed write, such as two first logins of the
-same user racing on the unique key, is caught and logged and cannot roll back the login. The
-losing race costs one learning login. For an existing profile the read takes a row lock
-(`PESSIMISTIC_WRITE`, `SELECT ... FOR UPDATE`), so concurrent logins of one user queue and each
-merges into the history the previous one committed.
+**Transactions.** Every statement of the extension is plain SQL that every database Keycloak
+supports accepts, run on the request's own connection, in the request's own transaction, isolated
+by a JDBC savepoint (`store/IsolatedStatement`). Per-login and per-user statements carry a 2 second
+query timeout. On PostgreSQL a failed statement aborts the transaction it runs in; rolling back to
+the savepoint undoes only the extension's statement, so a missing, locked or overloaded table
+fails the evaluation open (or skips the learning) while the login carries on. Using the request's
+connection, rather than a transaction of its own, means the extension never takes a second pooled
+connection: under a busy pool a second connection would make every login wait for the pool's
+acquisition timeout. Keycloak's connection pool refuses `rollback(Savepoint)` on a connection
+enlisted in a transaction, so the savepoint and the statement go to the physical connection under
+it (`Connection.unwrap`), which is the one in the transaction; this also holds with XA
+transactions enabled. The query timeout is reset before the statement closes, because H2 applies
+it to the whole session. If a connection ever allows no savepoint, the statements run unisolated
+(as in 0.1.0) and a warning is logged once.
+
+The write runs in the login's transaction, so a login that rolls back teaches nothing. A user's
+first login inserts the row. A later login reads the row with a lock (`FOR UPDATE`; a lock hint on
+SQL Server), so it merges into the latest version on every isolation level (MySQL and MariaDB
+default to repeatable read) and concurrent logins of one user queue, then updates it. A missing
+row is never locked: on InnoDB that takes a gap lock, and two concurrent first logins holding gap
+locks deadlock on insert. When two first logins race, the losing insert fails on the unique key
+inside its savepoint and that login is simply not learned; re-reading after a duplicate key could
+deadlock on InnoDB, and one learning login is a small price.
+
+The row lock lasts until the login's transaction commits, a few milliseconds later. If something
+later in the same request wrote a row referencing the user while an admin deleted that user, the
+two could deadlock and the database would cancel one side; the user being deleted mid-login is
+the only way to get there.
+
+Under InnoDB's repeatable read, the unlocked existence check uses the request's snapshot, so a
+login that started before another login of the same user created the row also tries to insert,
+loses on the unique key and is not learned: the same cost as the first-login race.
+
+If a database ever rolls back the whole transaction instead of the statement (InnoDB does after a
+deadlock), the rollback to the savepoint fails. The extension then marks the request's transaction
+rollback-only and fails the login with Keycloak's error page and a `LOGIN_ERROR` event, instead of
+sending the browser back to the application with a code that could not be redeemed. The new write
+path does not provoke this; it guards against a database killing the transaction for its own
+reasons.
 
 **Cleanup.** The entity provider factory listens for `UserModel.UserRemovedEvent` and
-`RealmModel.RealmRemovedEvent` and bulk-deletes the matching rows in the deleting transaction,
-so the rows go if and only if the user or realm goes. The table itself stays if the extension
-is removed.
+`RealmModel.RealmRemovedEvent` and deletes the matching rows in the removal's transaction, so the
+rows go if and only if the user or realm goes. A user's delete has the 2 second timeout; a realm's
+deletes every profile of the realm and has none, so a realm with millions of profiles can still be
+removed. The price: a realm removal waits on a locked profile table (a long admin transaction, a
+table rewrite) until the lock goes or Keycloak's transaction timeout ends it. A missing table means there is nothing to delete and never blocks the removal. Any other
+failure, such as the timeout on a locked table, fails the removal cleanly so the admin can retry
+it, rather than leaving the profile behind. The table itself stays if the extension is removed.
 
 ## Fail open
 
 | Failure | Result |
 |---|---|
-| Profile read, JSON parse or scoring throws | Level low, reasons `evaluation_error`, `outcome=error` metric, warning log naming only the realm (the exception is logged at debug). The login continues. |
+| Profile read fails or takes longer than 2 seconds, JSON parse or scoring throws | Level low, reasons `evaluation_error`, `outcome=error` metric, warning log naming only the realm (the exception is logged at debug). The login continues. |
 | Building the signals throws (for example the brute force store) | Same as above. |
 | Adding event details on parent flow success throws | Warning log; the login continues without re-added details. |
-| Cookie or profile write throws | Warning log; the login, which already succeeded, is unaffected. |
+| Cookie or profile write throws | Warning log; the login carries on, not learned. |
+| A profile statement broke the request's transaction (the rollback to its savepoint failed) | The transaction is marked rollback-only and the login fails with Keycloak's error page and a `LOGIN_ERROR` event. |
+| Profile table missing on user or realm removal | Warning log; the removal goes ahead. |
+| Profile delete fails otherwise (for example a user's delete timing out on a locked table) | The removal fails and can be retried once the table is free; no profile is left behind. |
 | Micrometer missing or failing | Ignored. |
 
-A database error on the read may still fail the request on databases that abort a transaction
-after a failed statement (PostgreSQL). In that case the rest of the login could not have
-committed either; the extension does not make it worse.
+Every statement of the extension is isolated by a savepoint, so none of these failures can abort
+the transaction of the login or of the removal, including on PostgreSQL.
 
 ## Event details and logs
 
@@ -191,8 +229,17 @@ cookie name.
   and prefix parsing, the device cookie, the condition, note round trip, event details, fail
   open, and provider registration.
 - Integration (`mvn verify`, `*IT`): Testcontainers boots `quay.io/keycloak/keycloak` with the
-  jar and imports a realm with the README flow, then drives browser logins over HTTP: learning
-  logins pass without step-up and set the cookie, a known browser stays low with the details on
-  its `LOGIN` event, a fresh browser after learning gets the OTP form and abandoning it teaches
-  nothing, a high learning score is denied with the details on `LOGIN_ERROR`, and deleting a
-  user and a realm with profiles succeeds. CI runs this on Keycloak 26.2.5 and 26.7.4.
+  jar on PostgreSQL (or on the embedded development database with `-Dkeycloak.db=dev-file`) and
+  imports a realm with the README flow, then drives browser logins over HTTP: learning logins
+  pass without step-up and set the cookie, a known browser stays low with the details on its
+  `LOGIN` event, a fresh browser after learning gets the OTP form and abandoning it teaches
+  nothing, passing the OTP form finishes the login with the details on its `LOGIN` event and
+  teaches the device, a high learning score is denied with the details on `LOGIN_ERROR`, and
+  deleting a user and a realm with profiles succeeds. On PostgreSQL they also check that a
+  missing profile table and a locked one both fail open with a redeemable code, that a user can
+  still be deleted while the table is missing, and that a locked table fails a deletion quickly
+  instead of leaving the profile behind, and that a realm with three million profiles can still be
+  deleted. Keycloak runs with a pool of two connections, and two
+  concurrent logins must each finish within 3 seconds, which catches any second connection taken
+  by the extension; four concurrent first logins of one user must all succeed. CI runs this on Keycloak 26.2.5 and 26.7.4,
+  each on both databases.

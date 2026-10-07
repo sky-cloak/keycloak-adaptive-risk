@@ -9,7 +9,8 @@ Deny access for high.
 - Pure Java, one small jar, no bundled libraries, no native code, no external calls.
 - Explainable: every login event carries `risk_score`, `risk_level` and `risk_reasons`.
 - Learns only from logins that fully succeeded, so a login stopped at step-up teaches it nothing.
-- Fails open: if scoring fails, the login continues as low risk and the failure is counted.
+- Fails open: if scoring fails, or the profile table is missing or slow to answer, the login
+  continues as low risk and the failure is counted.
 
 Built and maintained by [Skycloak](https://skycloak.io). It works on any Keycloak 26.2 or
 later 26.x installation. See [docs/design.md](docs/design.md) for how it works and
@@ -28,7 +29,7 @@ bin/kc.sh build   # optimized images; start-dev and auto-build do this for you
 Or in a Dockerfile:
 
 ```dockerfile
-ADD --chmod=0644 https://github.com/sky-cloak/keycloak-adaptive-risk/releases/download/v0.1.0/keycloak-adaptive-risk.jar /opt/keycloak/providers/keycloak-adaptive-risk.jar
+ADD --chmod=0644 https://github.com/sky-cloak/keycloak-adaptive-risk/releases/download/v0.1.1/keycloak-adaptive-risk.jar /opt/keycloak/providers/keycloak-adaptive-risk.jar
 RUN /opt/keycloak/bin/kc.sh build
 ```
 
@@ -137,7 +138,7 @@ The condition does not match, and logs a warning, when no evaluation ran earlier
 | `recent_failures` | Keycloak's brute force record shows 3 or more failed attempts, the last one within the hour. Needs **brute force detection** on in the realm; skipped otherwise. |
 | `unusual_hour` | No past successful login at this UTC hour or the hour on either side. |
 | `learning` | The user has fewer successful logins than `learning-logins`. History reasons (all of the above except `recent_failures`) do not fire, and the score is the learning score plus `recent_failures`. |
-| `evaluation_error` | Scoring failed. The login continues as low risk. |
+| `evaluation_error` | Scoring failed, or reading the profile failed or took longer than 2 seconds. The login continues as low risk. |
 
 ## Event details
 
@@ -201,12 +202,14 @@ on HTTPS, scoped to the realm path, and lasts one year.
 ```bash
 mvn test                                  # unit tests
 mvn verify                                # unit tests, jar, and integration tests (needs Docker)
+mvn -Dkeycloak.db=dev-file verify         # integration tests on Keycloak's embedded database instead of PostgreSQL
 mvn -Dkeycloak.version=26.7.4 verify      # compile and test against another Keycloak 26.x
 mvn -Dkeycloak.url=http://localhost:8080 verify
                                           # integration tests against a Keycloak you started
 ```
 
-The integration tests boot `quay.io/keycloak/keycloak` with the jar through Testcontainers.
+The integration tests boot `quay.io/keycloak/keycloak` with the jar on PostgreSQL through
+Testcontainers.
 To run them against your own Keycloak instead, start it with the jar installed, admin
 `admin`/`admin`, and the two environment variables set to `X-Test-Client-IP` and
 `X-Test-Country`.

@@ -10,6 +10,11 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.ArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -107,6 +112,98 @@ class AdaptiveRiskIT {
         Browser.Result known = home.login(realm, "bob", "bob-password");
         assertEquals(Browser.Outcome.LOGGED_IN, known.outcome(), () -> describe(known));
         assertEquals(4, admin.eventDetails(realm, admin.userId(realm, "bob"), "LOGIN").size());
+    }
+
+    @Test
+    void passingStepUpLearnsTheDeviceAndTheLoginEventCarriesTheRisk() throws Exception {
+        Browser home = new Browser(baseUrl, HOME_IP, HOME_COUNTRY);
+        for (int i = 1; i <= 3; i++) {
+            Browser.Result learning = home.login(realm, "erin", "erin-password");
+            assertEquals(Browser.Outcome.LOGGED_IN, learning.outcome(), () -> describe(learning));
+            home.forgetSession();
+        }
+
+        Browser laptop = new Browser(baseUrl, HOME_IP, HOME_COUNTRY);
+        Browser.Result stepUp = laptop.login(realm, "erin", "erin-password");
+        assertEquals(Browser.Outcome.OTP_FORM, stepUp.outcome(), () -> describe(stepUp));
+        Browser.Result passed = laptop.submitOtp(stepUp, Totp.now());
+
+        assertEquals(Browser.Outcome.LOGGED_IN, passed.outcome(), () -> describe(passed));
+        assertEquals(200, laptop.exchangeCode(realm, passed));
+        assertDeviceCookie(passed.setCookies());
+        // The evaluation ran in the request before the OTP form; its details still reach this LOGIN.
+        Map<String, String> details = admin.eventDetails(realm, admin.userId(realm, "erin"), "LOGIN").get(0);
+        assertEquals("medium", details.get("risk_level"));
+        assertEquals("new_device", details.get("risk_reasons"));
+        assertEquals("30", details.get("risk_score"));
+        assertNoPersonalData(details);
+
+        // The step-up taught the profile this browser: next time it is not asked again.
+        laptop.forgetSession();
+        Browser.Result again = laptop.login(realm, "erin", "erin-password");
+        assertEquals(Browser.Outcome.LOGGED_IN, again.outcome(), () -> describe(again));
+    }
+
+    @Test
+    void concurrentLoginsNeverWaitForASecondDatabaseConnection() throws Exception {
+        // Keycloak runs with a pool of two connections. Each login holds one; if the extension took
+        // a second one for its read or write, two logins at once would wait for the pool's
+        // acquisition timeout (5 to 20 seconds).
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            for (int round = 1; round <= 3; round++) {
+                List<Future<Long>> logins = new ArrayList<>();
+                for (String user : List.of("frank", "grace")) {
+                    logins.add(pool.submit(() -> {
+                        long started = System.nanoTime();
+                        Browser.Result login = new Browser(baseUrl, HOME_IP, HOME_COUNTRY).login(realm, user, user + "-password");
+                        assertEquals(Browser.Outcome.LOGGED_IN, login.outcome(), () -> describe(login));
+                        return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+                    }));
+                }
+                for (Future<Long> login : logins) {
+                    long millis = login.get(60, TimeUnit.SECONDS);
+                    assertTrue(millis < 3000, "round " + round + ": a login took " + millis + " ms");
+                }
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+        // Every login was learned: after the three concurrent rounds the profile is no longer learning.
+        Browser.Result fourth = new Browser(baseUrl, HOME_IP, HOME_COUNTRY).login(realm, "frank", "frank-password");
+        assertEquals(Browser.Outcome.LOGGED_IN, fourth.outcome(), () -> describe(fourth));
+        Map<String, String> details = admin.eventDetails(realm, admin.userId(realm, "frank"), "LOGIN").get(0);
+        assertFalse(details.get("risk_reasons").contains("learning"), "three logins learned, got " + details);
+    }
+
+    @Test
+    void concurrentFirstLoginsOfOneUserBothSucceed() throws Exception {
+        String user = "dave";
+        admin.createUser(realm, user, user + "-password");
+        ExecutorService pool = Executors.newFixedThreadPool(4);
+        try {
+            List<Future<Browser.Result>> logins = new ArrayList<>();
+            for (int i = 0; i < 4; i++) {
+                logins.add(pool.submit(() -> new Browser(baseUrl, HOME_IP, HOME_COUNTRY).login(realm, user, user + "-password")));
+            }
+            for (Future<Browser.Result> login : logins) {
+                Browser.Result result = login.get(60, TimeUnit.SECONDS);
+                assertEquals(Browser.Outcome.LOGGED_IN, result.outcome(), () -> describe(result));
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+        // The racing first logins created one profile; the logins that lost the insert are simply
+        // not learned. Three more logins finish the learning.
+        Browser browser = new Browser(baseUrl, HOME_IP, HOME_COUNTRY);
+        for (int i = 0; i < 3; i++) {
+            assertEquals(Browser.Outcome.LOGGED_IN, browser.login(realm, user, user + "-password").outcome());
+            browser.forgetSession();
+        }
+        Browser.Result last = browser.login(realm, user, user + "-password");
+        assertEquals(Browser.Outcome.LOGGED_IN, last.outcome(), () -> describe(last));
+        Map<String, String> details = admin.eventDetails(realm, admin.userId(realm, user), "LOGIN").get(0);
+        assertFalse(details.get("risk_reasons").contains("learning"), "learned by now, got " + details);
     }
 
     @Test

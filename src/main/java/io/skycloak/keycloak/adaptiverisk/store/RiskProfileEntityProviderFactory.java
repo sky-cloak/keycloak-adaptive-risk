@@ -69,8 +69,12 @@ public class RiskProfileEntityProviderFactory implements JpaEntityProviderFactor
         factory.register(RiskProfileEntityProviderFactory::onEvent);
     }
 
+    /**
+     * Deletes the profile rows of a removed user or realm in the removal's transaction, so they go
+     * if and only if it commits. The delete is isolated by a savepoint: a missing table never blocks
+     * the removal, and any other failure fails it cleanly instead of aborting it half way.
+     */
     static void onEvent(ProviderEvent event) {
-        // Runs in the deleting transaction, so the rows go if and only if the user or realm goes.
         if (event instanceof UserModel.UserRemovedEvent removed) {
             int rows = JpaProfileStore.of(removed.getKeycloakSession())
                     .deleteUser(removed.getRealm().getId(), removed.getUser().getId());

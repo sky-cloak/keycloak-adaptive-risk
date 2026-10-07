@@ -2,6 +2,7 @@ package io.skycloak.keycloak.adaptiverisk.it;
 
 import java.io.IOException;
 import java.net.URI;
+import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -23,6 +24,8 @@ final class Browser {
 
     static final String REDIRECT_URI = "http://localhost/callback";
     private static final String DEVICE_COOKIE = "SKYCLOAK_ADAPTIVE_RISK_DEVICE";
+    private static final Pattern SELECTED_CREDENTIAL = Pattern.compile("name=\"selectedCredentialId\"[^>]*value=\"([^\"]+)\"");
+    private static final Pattern CODE = Pattern.compile("[?&]code=([^&]+)");
     private static final Pattern FORM_ACTION = Pattern.compile("<form[^>]*action=\"([^\"]+)\"", Pattern.CASE_INSENSITIVE);
 
     /** Where a login attempt ended. */
@@ -35,7 +38,7 @@ final class Browser {
         REFUSED
     }
 
-    record Result(Outcome outcome, int status, String body, List<String> setCookies) {
+    record Result(Outcome outcome, int status, String body, List<String> setCookies, String location) {
     }
 
     /**
@@ -69,6 +72,38 @@ final class Browser {
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .POST(HttpRequest.BodyPublishers.ofString(form(Map.of("username", username, "password", password)))));
         return classify(posted);
+    }
+
+    /** Submits a code on the OTP form a login ended on. */
+    Result submitOtp(Result otpForm, String code) throws IOException, InterruptedException {
+        Map<String, String> fields = new LinkedHashMap<>();
+        Matcher credential = SELECTED_CREDENTIAL.matcher(otpForm.body());
+        if (credential.find()) {
+            fields.put("selectedCredentialId", credential.group(1));
+        }
+        fields.put("otp", code);
+        HttpResponse<String> posted = send(HttpRequest.newBuilder(URI.create(formAction(otpForm.body())))
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .POST(HttpRequest.BodyPublishers.ofString(form(fields))));
+        return classify(posted);
+    }
+
+    /**
+     * Exchanges the code of a finished login for tokens, as the application would.
+     *
+     * @return the HTTP status of the token endpoint: 200 when Keycloak issued tokens
+     */
+    int exchangeCode(String realm, Result loggedIn) throws IOException, InterruptedException {
+        Matcher code = CODE.matcher(loggedIn.location());
+        if (!code.find()) {
+            throw new IllegalStateException("No code in " + loggedIn.location());
+        }
+        String body = form(Map.of("grant_type", "authorization_code", "client_id", "it-app",
+                "code", URLDecoder.decode(code.group(1), StandardCharsets.UTF_8), "redirect_uri", REDIRECT_URI));
+        return http.send(HttpRequest.newBuilder(URI.create(baseUrl + "/realms/" + realm + "/protocol/openid-connect/token"))
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build(), HttpResponse.BodyHandlers.ofString()).statusCode();
     }
 
     /**
@@ -120,7 +155,7 @@ final class Browser {
         } else {
             outcome = Outcome.REFUSED;
         }
-        return new Result(outcome, response.statusCode(), response.body(), setCookies);
+        return new Result(outcome, response.statusCode(), response.body(), setCookies, location);
     }
 
     private static String formAction(String html) {

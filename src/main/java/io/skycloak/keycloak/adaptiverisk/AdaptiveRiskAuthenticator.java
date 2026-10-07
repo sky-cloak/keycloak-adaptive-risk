@@ -5,6 +5,8 @@ import jakarta.ws.rs.core.Cookie;
 import jakarta.ws.rs.core.HttpHeaders;
 import org.jboss.logging.Logger;
 import org.keycloak.authentication.AuthenticationFlowCallback;
+import org.keycloak.authentication.AuthenticationFlowError;
+import org.keycloak.authentication.AuthenticationFlowException;
 import org.keycloak.authentication.AuthenticationFlowContext;
 import org.keycloak.common.util.Time;
 import org.keycloak.models.AuthenticationFlowModel;
@@ -13,7 +15,6 @@ import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserLoginFailureModel;
 import org.keycloak.models.UserModel;
-import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.services.resources.RealmsResource;
 import org.keycloak.sessions.AuthenticationSessionModel;
 
@@ -37,6 +38,8 @@ public class AdaptiveRiskAuthenticator implements AuthenticationFlowCallback {
     private static final Logger log = Logger.getLogger(AdaptiveRiskAuthenticator.class);
 
     private final KeycloakSession session;
+    /** Set when a profile statement broke the request's transaction; the login must then fail. */
+    private boolean transactionBroken;
     private final TrustedHeaders headers;
 
     public AdaptiveRiskAuthenticator(KeycloakSession session, TrustedHeaders headers) {
@@ -59,12 +62,21 @@ public class AdaptiveRiskAuthenticator implements AuthenticationFlowCallback {
         }
 
         Evaluation evaluation;
+        transactionBroken = false;
         try {
             evaluation = evaluate(context, realm, user);
         } catch (RuntimeException e) {
             logFailure(realm, e);
             evaluation = new Evaluation(Evaluation.Outcome.ERROR, user.getId(), Assessment.evaluationError(),
                     null, null, null, 0);
+        }
+        if (transactionBroken) {
+            // The transaction is marked rollback-only; without this the browser would be sent back
+            // to the application with a code that cannot be redeemed. This shows the error page and
+            // records LOGIN_ERROR instead.
+            evaluation.eventDetails().forEach(context.getEvent()::detail);
+            throw new AuthenticationFlowException("adaptive risk: the login's transaction was rolled back",
+                    AuthenticationFlowError.INTERNAL_ERROR);
         }
 
         evaluation.notes().forEach(authSession::setAuthNote);
@@ -93,15 +105,48 @@ public class AdaptiveRiskAuthenticator implements AuthenticationFlowCallback {
         LoginSignals signals = new LoginSignals(hasDevice ? DeviceCookie.hash(deviceId) : null, network, country,
                 hour, now, failures(realm, user));
 
-        Assessment assessment = Evaluation.assess(settings,
-                () -> JpaProfileStore.of(session).load(realm.getId(), user.getId()),
-                () -> signals);
+        String realmId = realm.getId();
+        String userId = user.getId();
+        Assessment assessment = Evaluation.assess(settings, () -> loadProfile(realmId, userId), () -> signals);
         if (assessment.failed()) {
             log.warnf("Adaptive risk evaluation failed open to low: the profile could not be read (realm=%s)",
                     realm.getName());
         }
         return new Evaluation(Evaluation.outcomeOf(assessment), user.getId(), assessment, country, deviceId,
                 network, hour);
+    }
+
+    /** Reads the profile on the login's own connection, isolated by a savepoint (see {@link JpaProfileStore#load}). */
+    private RiskProfile loadProfile(String realmId, String userId) {
+        try {
+            return JpaProfileStore.of(session).load(realmId, userId);
+        } catch (JpaProfileStore.ProfileStoreException e) {
+            failTransactionIfBroken(e);
+            throw e;
+        }
+    }
+
+    /**
+     * A failure that may have broken the request's transaction (the database rolled it back, or no
+     * savepoint protected the statement) must not let the rest of the request run on it.
+     */
+    private void failTransactionIfBroken(JpaProfileStore.ProfileStoreException e) {
+        if (!e.transactionIntact()) {
+            // The SQLState only: driver messages can carry key values, such as a user ID.
+            log.warnf("Adaptive risk: a profile statement failed and the request's transaction may be broken; "
+                    + "failing the login (SQLState %s)", sqlState(e.getCause()));
+            session.getTransactionManager().setRollbackOnly();
+            transactionBroken = true;
+        }
+    }
+
+    private static String sqlState(Throwable error) {
+        for (Throwable t = error; t != null; t = t.getCause()) {
+            if (t instanceof java.sql.SQLException sql && sql.getSQLState() != null) {
+                return sql.getSQLState();
+            }
+        }
+        return error == null ? "none" : error.getClass().getName();
     }
 
     /** Keycloak writes failure records only when brute force detection is on; null means skip the reason. */
@@ -159,13 +204,24 @@ public class AdaptiveRiskAuthenticator implements AuthenticationFlowCallback {
                     evaluation.country(), evaluation.hourUtc(), Time.currentTimeMillis(), null);
             String realmId = realm.getId();
             String userId = user.getId();
-            // Own transaction: a failed write (for example two first logins racing on the unique key)
-            // must not roll back the login itself.
-            KeycloakModelUtils.runJobInTransaction(session.getKeycloakSessionFactory(),
-                    s -> JpaProfileStore.of(s).recordSuccess(realmId, userId, login, retention));
+            // On the login's own connection and in its transaction, isolated by savepoints: a failed
+            // write skips the learning without failing the login, and no second pooled connection
+            // is taken.
+            try {
+                JpaProfileStore.of(session).recordSuccess(realmId, userId, login, retention);
+            } catch (JpaProfileStore.ProfileStoreException e) {
+                failTransactionIfBroken(e);
+                if (transactionBroken) {
+                    // Escapes to Keycloak, which shows the error page instead of a dead code.
+                    throw new AuthenticationFlowException("adaptive risk: the login's transaction was rolled back",
+                            AuthenticationFlowError.INTERNAL_ERROR);
+                }
+                throw e;
+            }
+        } catch (AuthenticationFlowException e) {
+            throw e;
         } catch (Throwable t) {
-            log.warnf("Adaptive risk could not record a successful login; the login is unaffected: %s",
-                    t.getClass().getName());
+            log.warnf("Adaptive risk could not record a successful login: %s", t.getClass().getName());
         }
     }
 
