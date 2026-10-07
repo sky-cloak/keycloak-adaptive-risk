@@ -166,9 +166,16 @@ later in the same request wrote a row referencing the user while an admin delete
 two could deadlock and the database would cancel one side; the user being deleted mid-login is
 the only way to get there.
 
+Under InnoDB's repeatable read, the unlocked existence check uses the request's snapshot, so a
+login that started before another login of the same user created the row also tries to insert,
+loses on the unique key and is not learned: the same cost as the first-login race.
+
 If a database ever rolls back the whole transaction instead of the statement (InnoDB does after a
 deadlock), the rollback to the savepoint fails. The extension then marks the request's transaction
-rollback-only, so the request fails instead of carrying on half undone.
+rollback-only and fails the login with Keycloak's error page and a `LOGIN_ERROR` event, instead of
+sending the browser back to the application with a code that could not be redeemed. The new write
+path does not provoke this; it guards against a database killing the transaction for its own
+reasons.
 
 **Cleanup.** The entity provider factory listens for `UserModel.UserRemovedEvent` and
 `RealmModel.RealmRemovedEvent` and deletes the matching rows in the removal's transaction, so the
@@ -186,7 +193,8 @@ it, rather than leaving the profile behind. The table itself stays if the extens
 | Profile read fails or takes longer than 2 seconds, JSON parse or scoring throws | Level low, reasons `evaluation_error`, `outcome=error` metric, warning log naming only the realm (the exception is logged at debug). The login continues. |
 | Building the signals throws (for example the brute force store) | Same as above. |
 | Adding event details on parent flow success throws | Warning log; the login continues without re-added details. |
-| Cookie or profile write throws | Warning log; the login, which already succeeded, is unaffected. |
+| Cookie or profile write throws | Warning log; the login carries on, not learned. |
+| A profile statement broke the request's transaction (the rollback to its savepoint failed) | The transaction is marked rollback-only and the login fails with Keycloak's error page and a `LOGIN_ERROR` event. |
 | Profile table missing on user or realm removal | Warning log; the removal goes ahead. |
 | Profile delete fails otherwise (for example a user's delete timing out on a locked table) | The removal fails and can be retried once the table is free; no profile is left behind. |
 | Micrometer missing or failing | Ignored. |
