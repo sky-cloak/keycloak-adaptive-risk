@@ -1,7 +1,11 @@
 package io.skycloak.keycloak.adaptiverisk;
 
+import io.skycloak.keycloak.adaptiverisk.geoip.GeoIpCountry;
+import io.skycloak.keycloak.adaptiverisk.geoip.MmdbWriter;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -127,5 +131,38 @@ class RequestSignalsTest {
     void deviceIdsAreStoredAsSha256Hex() {
         // Known answer: SHA-256("abc").
         assertEquals("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", DeviceCookie.hash("abc"));
+    }
+
+    // --- country resolution ---
+
+    @Test
+    void theCountryHeaderWinsOverTheGeoIpDatabase() throws Exception {
+        CountryResolver resolver = resolverWithDatabase();
+
+        assertEquals("FR", resolver.country(Map.of("CF-IPCountry", "FR")::get, "203.0.113.9"));
+    }
+
+    @Test
+    void theGeoIpDatabaseAnswersWhenTheHeaderIsAbsentOrUnknown() throws Exception {
+        CountryResolver resolver = resolverWithDatabase();
+
+        assertEquals("CA", resolver.country(Map.<String, String>of()::get, "203.0.113.9"));
+        assertEquals("CA", resolver.country(Map.of("CF-IPCountry", "XX")::get, "203.0.113.9"));
+    }
+
+    @Test
+    void withoutHeaderOrDatabaseThereIsNoCountry() {
+        CountryResolver resolver = new CountryResolver(TrustedHeaders.fromEnv(Map.of()), null);
+
+        assertNull(resolver.country(Map.of("CF-IPCountry", "FR")::get, "203.0.113.9"));
+    }
+
+    /** Country header CF-IPCountry, and a GeoIP database placing 203.0.113.0/24 in CA. */
+    private static CountryResolver resolverWithDatabase() throws Exception {
+        Path file = Files.createTempFile("country", ".mmdb");
+        file.toFile().deleteOnExit();
+        Files.write(file, new MmdbWriter(6, 24).insert("203.0.113.0/24", MmdbWriter.countryRecord("CA")).build());
+        return new CountryResolver(TrustedHeaders.fromEnv(Map.of("SKYCLOAK_ADAPTIVE_RISK_COUNTRY_HEADER", "CF-IPCountry")),
+                GeoIpCountry.fromEnv(Map.of("SKYCLOAK_ADAPTIVE_RISK_GEOIP_DATABASE", file.toString())));
     }
 }

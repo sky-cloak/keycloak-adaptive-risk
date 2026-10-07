@@ -1,5 +1,6 @@
 package io.skycloak.keycloak.adaptiverisk.it;
 
+import io.skycloak.keycloak.adaptiverisk.geoip.MmdbWriter;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.Network;
 import org.testcontainers.containers.wait.strategy.Wait;
@@ -19,12 +20,16 @@ import java.util.concurrent.CompletableFuture;
  * PostgreSQL, the database most production deployments use. Set the system property
  * keycloak.db=dev-file to boot it on Keycloak's embedded development database instead. Set
  * keycloak.url to run the tests against a Keycloak you started yourself with the jar installed,
- * the two headers configured as below, and admin/admin as bootstrap admin.
+ * the two headers and a GeoIP database configured as below, and admin/admin as bootstrap admin.
  */
 final class KeycloakTestServer {
 
     static final String CLIENT_IP_HEADER = "X-Test-Client-IP";
     static final String COUNTRY_HEADER = "X-Test-Country";
+    /** The fixture GeoIP database places this network in {@link #GEOIP_COUNTRY}. */
+    static final String GEOIP_NETWORK = "198.51.100.0/24";
+    static final String GEOIP_COUNTRY = "NZ";
+    private static final String GEOIP_PATH = "/opt/keycloak/conf/country.mmdb";
     static final String ADMIN_USER = "admin";
     static final String ADMIN_PASSWORD = "admin";
 
@@ -60,6 +65,8 @@ final class KeycloakTestServer {
                 .withEnv("KC_BOOTSTRAP_ADMIN_PASSWORD", ADMIN_PASSWORD)
                 .withEnv("SKYCLOAK_ADAPTIVE_RISK_CLIENT_IP_HEADER", CLIENT_IP_HEADER)
                 .withEnv("SKYCLOAK_ADAPTIVE_RISK_COUNTRY_HEADER", COUNTRY_HEADER)
+                .withCopyFileToContainer(MountableFile.forHostPath(geoIpDatabase(), 0644), GEOIP_PATH)
+                .withEnv("SKYCLOAK_ADAPTIVE_RISK_GEOIP_DATABASE", GEOIP_PATH)
                 .withExposedPorts(8080)
                 .waitingFor(Wait.forHttp("/realms/master").forPort(8080).withStartupTimeout(Duration.ofMinutes(4)));
         // Newer 26.x dev mode binds to localhost only, unreachable through the mapped port.
@@ -85,6 +92,19 @@ final class KeycloakTestServer {
         keycloak.start();
         baseUrl = "http://" + keycloak.getHost() + ":" + keycloak.getMappedPort(8080);
         return baseUrl;
+    }
+
+    private static Path geoIpDatabase() {
+        try {
+            Path file = Files.createTempFile("adaptive-risk-country", ".mmdb");
+            file.toFile().deleteOnExit();
+            Files.write(file, new MmdbWriter(6, 28).sharedStrings()
+                    .insert(GEOIP_NETWORK, MmdbWriter.countryRecord(GEOIP_COUNTRY))
+                    .build());
+            return file;
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not write the fixture GeoIP database", e);
+        }
     }
 
     /** True when the booted Keycloak runs on PostgreSQL, so tests can run SQL against it. */

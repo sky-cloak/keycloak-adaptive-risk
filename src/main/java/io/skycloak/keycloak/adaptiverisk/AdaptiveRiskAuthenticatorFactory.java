@@ -1,5 +1,6 @@
 package io.skycloak.keycloak.adaptiverisk;
 
+import io.skycloak.keycloak.adaptiverisk.geoip.GeoIpCountry;
 import org.keycloak.Config;
 import org.keycloak.authentication.AuthenticationFlowCallbackFactory;
 import org.keycloak.authentication.Authenticator;
@@ -23,7 +24,7 @@ public class AdaptiveRiskAuthenticatorFactory implements AuthenticationFlowCallb
 
     private static final List<ProviderConfigProperty> CONFIG = buildConfig();
 
-    private TrustedHeaders headers = TrustedHeaders.fromEnv(System.getenv());
+    private CountryResolver countries = new CountryResolver(TrustedHeaders.fromEnv(System.getenv()), null);
 
     private static List<ProviderConfigProperty> buildConfig() {
         ProviderConfigurationBuilder builder = ProviderConfigurationBuilder.create();
@@ -67,7 +68,7 @@ public class AdaptiveRiskAuthenticatorFactory implements AuthenticationFlowCallb
 
     @Override
     public Authenticator create(KeycloakSession session) {
-        return new AdaptiveRiskAuthenticator(session, headers);
+        return new AdaptiveRiskAuthenticator(session, countries);
     }
 
     @Override
@@ -114,7 +115,7 @@ public class AdaptiveRiskAuthenticatorFactory implements AuthenticationFlowCallb
 
     @Override
     public void init(Config.Scope config) {
-        headers = TrustedHeaders.fromEnv(System.getenv());
+        countries = new CountryResolver(TrustedHeaders.fromEnv(System.getenv()), GeoIpCountry.fromEnv(System.getenv()));
     }
 
     @Override
@@ -124,6 +125,8 @@ public class AdaptiveRiskAuthenticatorFactory implements AuthenticationFlowCallb
 
     @Override
     public void close() {
-        // Stateless.
+        if (countries.geoIp() != null) {
+            countries.geoIp().close();
+        }
     }
 }

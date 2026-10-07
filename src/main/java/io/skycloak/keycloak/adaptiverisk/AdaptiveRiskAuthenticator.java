@@ -41,10 +41,12 @@ public class AdaptiveRiskAuthenticator implements AuthenticationFlowCallback {
     /** Set when a profile statement broke the request's transaction; the login must then fail. */
     private boolean transactionBroken;
     private final TrustedHeaders headers;
+    private final CountryResolver countries;
 
-    public AdaptiveRiskAuthenticator(KeycloakSession session, TrustedHeaders headers) {
+    public AdaptiveRiskAuthenticator(KeycloakSession session, CountryResolver countries) {
         this.session = session;
-        this.headers = headers;
+        this.headers = countries.headers();
+        this.countries = countries;
     }
 
     @Override
@@ -100,8 +102,9 @@ public class AdaptiveRiskAuthenticator implements AuthenticationFlowCallback {
         boolean hasDevice = DeviceCookie.isValid(presented);
         String deviceId = hasDevice ? presented : DeviceCookie.newId();
 
-        String network = Networks.prefix(headers.clientAddress(header, context.getConnection().getRemoteAddr()));
-        String country = headers.country(header);
+        String address = headers.clientAddress(header, context.getConnection().getRemoteAddr());
+        String network = Networks.prefix(address);
+        String country = countries.country(header, address);
         LoginSignals signals = new LoginSignals(hasDevice ? DeviceCookie.hash(deviceId) : null, network, country,
                 hour, now, failures(realm, user));
 

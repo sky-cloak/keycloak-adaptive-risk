@@ -1,9 +1,7 @@
 package io.skycloak.keycloak.adaptiverisk;
 
-import java.util.Locale;
 import java.util.Map;
 import java.util.function.Function;
-import java.util.regex.Pattern;
 
 /**
  * Which request headers the operator trusts for the client address and the country, delivered as
@@ -17,10 +15,6 @@ public record TrustedHeaders(String clientIpHeader, String countryHeader) {
 
     public static final String ENV_CLIENT_IP_HEADER = "SKYCLOAK_ADAPTIVE_RISK_CLIENT_IP_HEADER";
     public static final String ENV_COUNTRY_HEADER = "SKYCLOAK_ADAPTIVE_RISK_COUNTRY_HEADER";
-
-    private static final Pattern COUNTRY = Pattern.compile("[A-Z][A-Z0-9]");
-    /** Cloudflare's code for an unknown country. */
-    private static final String UNKNOWN_COUNTRY = "XX";
 
     public static TrustedHeaders fromEnv(Map<String, String> env) {
         return new TrustedHeaders(trimmed(env.get(ENV_CLIENT_IP_HEADER)), trimmed(env.get(ENV_COUNTRY_HEADER)));
@@ -46,15 +40,7 @@ public record TrustedHeaders(String clientIpHeader, String countryHeader) {
         if (countryHeader == null) {
             return null;
         }
-        String value = trimmed(header.apply(countryHeader));
-        if (value == null) {
-            return null;
-        }
-        String code = value.toUpperCase(Locale.ROOT);
-        if (!COUNTRY.matcher(code).matches() || UNKNOWN_COUNTRY.equals(code)) {
-            return null;
-        }
-        return code;
+        return Countries.normalize(header.apply(countryHeader));
     }
 
     private static String trimmed(String value) {
