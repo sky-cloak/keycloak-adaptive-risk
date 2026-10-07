@@ -28,6 +28,7 @@ final class KeycloakTestServer {
     static final String ADMIN_USER = "admin";
     static final String ADMIN_PASSWORD = "admin";
 
+    static final int DB_POOL_SIZE = 2;
     private static final String DB_NAME = "keycloak";
     private static final String DB_USER = "keycloak";
     private static final String DB_PASSWORD = "keycloak";
@@ -62,7 +63,10 @@ final class KeycloakTestServer {
                 .withExposedPorts(8080)
                 .waitingFor(Wait.forHttp("/realms/master").forPort(8080).withStartupTimeout(Duration.ofMinutes(4)));
         // Newer 26.x dev mode binds to localhost only, unreachable through the mapped port.
-        List<String> command = new ArrayList<>(List.of("start-dev", "--http-host=0.0.0.0", "--metrics-enabled=true"));
+        // A pool of two connections: enough for one login at a time, so a login that takes a second
+        // connection stalls visibly when two run at once (see AdaptiveRiskIT).
+        List<String> command = new ArrayList<>(List.of("start-dev", "--http-host=0.0.0.0", "--metrics-enabled=true",
+                "--db-pool-max-size=" + DB_POOL_SIZE));
         if (usesPostgres()) {
             Network network = Network.newNetwork();
             postgres = new GenericContainer<>("postgres:16-alpine")
@@ -86,8 +90,15 @@ final class KeycloakTestServer {
     /** True when the booted Keycloak runs on PostgreSQL, so tests can run SQL against it. */
     static boolean usesPostgres() {
         String external = System.getProperty("keycloak.url");
-        return (external == null || external.isBlank())
-                && !"dev-file".equals(System.getProperty("keycloak.db", "postgres"));
+        if (external != null && !external.isBlank()) {
+            return false;
+        }
+        String db = System.getProperty("keycloak.db", "postgres");
+        return switch (db) {
+            case "postgres" -> true;
+            case "dev-file" -> false;
+            default -> throw new IllegalArgumentException("keycloak.db must be postgres or dev-file, not " + db);
+        };
     }
 
     /** Runs one SQL statement through psql in the database container and returns its output. */

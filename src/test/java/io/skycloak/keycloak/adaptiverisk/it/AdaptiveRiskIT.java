@@ -10,6 +10,11 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.ArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -137,6 +142,62 @@ class AdaptiveRiskIT {
         laptop.forgetSession();
         Browser.Result again = laptop.login(realm, "erin", "erin-password");
         assertEquals(Browser.Outcome.LOGGED_IN, again.outcome(), () -> describe(again));
+    }
+
+    @Test
+    void concurrentLoginsNeverWaitForASecondDatabaseConnection() throws Exception {
+        // Keycloak runs with a pool of two connections. Each login holds one; if the extension took
+        // a second one for its read or write, two logins at once would wait for the pool's
+        // acquisition timeout (5 to 20 seconds).
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            for (int round = 1; round <= 3; round++) {
+                List<Future<Long>> logins = new ArrayList<>();
+                for (String user : List.of("frank", "grace")) {
+                    logins.add(pool.submit(() -> {
+                        long started = System.nanoTime();
+                        Browser.Result login = new Browser(baseUrl, HOME_IP, HOME_COUNTRY).login(realm, user, user + "-password");
+                        assertEquals(Browser.Outcome.LOGGED_IN, login.outcome(), () -> describe(login));
+                        return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+                    }));
+                }
+                for (Future<Long> login : logins) {
+                    long millis = login.get(60, TimeUnit.SECONDS);
+                    assertTrue(millis < 3000, "round " + round + ": a login took " + millis + " ms");
+                }
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+        // Every login was learned: the writes did not fail open either.
+        assertEquals(3, admin.eventDetails(realm, admin.userId(realm, "frank"), "LOGIN").size());
+    }
+
+    @Test
+    void concurrentFirstLoginsOfOneUserAreBothLearned() throws Exception {
+        String user = "dave";
+        admin.createUser(realm, user, user + "-password");
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            List<Future<Browser.Result>> logins = new ArrayList<>();
+            for (int i = 0; i < 2; i++) {
+                logins.add(pool.submit(() -> new Browser(baseUrl, HOME_IP, HOME_COUNTRY).login(realm, user, user + "-password")));
+            }
+            for (Future<Browser.Result> login : logins) {
+                Browser.Result result = login.get(60, TimeUnit.SECONDS);
+                assertEquals(Browser.Outcome.LOGGED_IN, result.outcome(), () -> describe(result));
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+        // Racing on the unique key, one insert loses and is merged as an update: two learning logins
+        // counted, so the third is the last one still learning.
+        Browser third = new Browser(baseUrl, HOME_IP, HOME_COUNTRY);
+        assertEquals(Browser.Outcome.LOGGED_IN, third.login(realm, user, user + "-password").outcome());
+        third.forgetSession();
+        assertEquals(Browser.Outcome.LOGGED_IN, third.login(realm, user, user + "-password").outcome());
+        Map<String, String> fourth = admin.eventDetails(realm, admin.userId(realm, user), "LOGIN").get(0);
+        assertFalse(fourth.get("risk_reasons").contains("learning"), "four logins learned, got " + fourth);
     }
 
     @Test

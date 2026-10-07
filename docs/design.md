@@ -137,23 +137,35 @@ Each write refreshes the entries the login touched, drops entries unseen for the
 a long absence is still compared with their old history once, and the successful login then
 replaces it.
 
-**Transactions.** The read and the write each run in a transaction of their own
-(`KeycloakModelUtils.runJobInTransaction`, which suspends the request's JTA transaction). On
-PostgreSQL a failed statement aborts the transaction it runs in, so a read failing inside the
-login's own transaction (a missing table, a timeout) would fail the login instead of failing
-open. The read is one indexed select with a 2 second query timeout, so a locked or overloaded
-table delays a login by at most that much before the evaluation fails open. A failed write, such
-as two first logins of the same user racing on the unique key, is caught and logged and cannot
-roll back the login. The losing race costs one learning login. For an existing profile the write's read takes a row
-lock (`PESSIMISTIC_WRITE`, `SELECT ... FOR UPDATE`, with the same 2 second timeout), so
-concurrent logins of one user queue and each merges into the history the previous one committed.
+**Transactions.** Every statement of the extension runs on the request's own connection, in
+the request's own transaction, isolated by a JDBC savepoint and bounded by a 2 second query
+timeout (`store/IsolatedStatement`). On PostgreSQL a failed statement aborts the transaction it
+runs in; rolling back to the savepoint undoes only the extension's statement, so a missing,
+locked or overloaded table fails the evaluation open (or skips the learning) while the login
+carries on. Using the request's connection, rather than a transaction of its own, means the
+extension never takes a second pooled connection: under a busy pool a second connection would
+make every login wait for the pool's acquisition timeout. Keycloak's connection pool refuses
+`rollback(Savepoint)` on a connection enlisted in a transaction, so the savepoint and the
+statement go to the physical connection under it (`Connection.unwrap`), which is the one in the
+transaction. The statements are plain SQL that every database Keycloak supports accepts.
+
+Where the connection allows no savepoint (inside an XA transaction, or a pool without `unwrap`),
+the read and the write fall back to a transaction of their own through JPA
+(`KeycloakModelUtils.runJobInTransaction`), at the cost of a second connection for that moment,
+and deletes run through JPA in the removal's transaction.
+
+The write merges concurrent logins of one user optimistically: it reads the row, merges the
+login, and updates only if `LOGIN_COUNT` and `LAST_LOGIN_AT` are unchanged since the read;
+otherwise it reads the fresh row and merges once more. Two first logins racing on the unique key
+end the same way: the losing insert fails inside its savepoint and is retried as an update. The
+write happens before the login's transaction commits, so a login that rolls back teaches nothing.
 
 **Cleanup.** The entity provider factory listens for `UserModel.UserRemovedEvent` and
-`RealmModel.RealmRemovedEvent` and bulk-deletes the matching rows in a transaction of its own,
-for the same reason as the read: a failing delete inside the removal's transaction would abort
-the removal on PostgreSQL. A failed delete is logged and never blocks the removal. If the removal
-rolls back after the rows were deleted, the user only loses their learned profile, which
-relearns. The table itself stays if the extension is removed.
+`RealmModel.RealmRemovedEvent` and deletes the matching rows in the removal's transaction, so the
+rows go if and only if the user or realm goes. A missing table means there is nothing to delete
+and never blocks the removal. Any other failure, such as the 2 second timeout on a locked table,
+fails the removal cleanly so the admin can retry it, rather than leaving the profile behind. The
+table itself stays if the extension is removed.
 
 ## Fail open
 
@@ -163,11 +175,12 @@ relearns. The table itself stays if the extension is removed.
 | Building the signals throws (for example the brute force store) | Same as above. |
 | Adding event details on parent flow success throws | Warning log; the login continues without re-added details. |
 | Cookie or profile write throws | Warning log; the login, which already succeeded, is unaffected. |
-| Profile delete on user or realm removal throws | Warning log; the removal is unaffected. |
+| Profile table missing on user or realm removal | Warning log; the removal goes ahead. |
+| Profile delete fails otherwise (for example a timeout on a locked table) | The removal fails and can be retried; no profile is left behind. |
 | Micrometer missing or failing | Ignored. |
 
-Every database call of the extension runs in its own transaction, so none of these failures can
-abort the transaction of the login or of the removal, including on PostgreSQL.
+Every statement of the extension is isolated by a savepoint, so none of these failures can abort
+the transaction of the login or of the removal, including on PostgreSQL.
 
 ## Event details and logs
 
@@ -203,6 +216,9 @@ cookie name.
   nothing, passing the OTP form finishes the login with the details on its `LOGIN` event and
   teaches the device, a high learning score is denied with the details on `LOGIN_ERROR`, and
   deleting a user and a realm with profiles succeeds. On PostgreSQL they also check that a
-  missing profile table and a locked one both fail open with a redeemable code, and that a user
-  can still be deleted while the table is missing. CI runs this on Keycloak 26.2.5 and 26.7.4,
+  missing profile table and a locked one both fail open with a redeemable code, that a user can
+  still be deleted while the table is missing, and that a locked table fails a deletion quickly
+  instead of leaving the profile behind. Keycloak runs with a pool of two connections, and two
+  concurrent logins must each finish within 3 seconds, which catches any second connection taken
+  by the extension; two concurrent first logins of one user must both be learned. CI runs this on Keycloak 26.2.5 and 26.7.4,
   each on both databases.

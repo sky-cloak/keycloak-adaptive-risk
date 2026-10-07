@@ -39,6 +39,18 @@ final class AdminClient {
         send(HttpRequest.newBuilder(URI.create(baseUrl + "/admin/realms/" + realm)).DELETE());
     }
 
+    void createUser(String realm, String username, String password) throws IOException, InterruptedException {
+        String json = MAPPER.writeValueAsString(Map.of("username", username, "enabled", true,
+                "email", username + "@example.com", "emailVerified", true, "firstName", username, "lastName", "Example",
+                "credentials", List.of(Map.of("type", "password", "value", password, "temporary", false))));
+        HttpResponse<String> response = send(HttpRequest.newBuilder(URI.create(baseUrl + "/admin/realms/" + realm + "/users"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(json)));
+        if (response.statusCode() != 201) {
+            throw new IllegalStateException("User create returned " + response.statusCode() + ": " + response.body());
+        }
+    }
+
     String userId(String realm, String username) throws IOException, InterruptedException {
         JsonNode users = json(get("/admin/realms/" + realm + "/users?exact=true&username="
                 + URLEncoder.encode(username, StandardCharsets.UTF_8)));
@@ -46,11 +58,15 @@ final class AdminClient {
     }
 
     void deleteUser(String realm, String userId) throws IOException, InterruptedException {
-        HttpResponse<String> response = send(HttpRequest.newBuilder(
-                URI.create(baseUrl + "/admin/realms/" + realm + "/users/" + userId)).DELETE());
-        if (response.statusCode() != 204) {
-            throw new IllegalStateException("User delete returned " + response.statusCode() + ": " + response.body());
+        int status = deleteUserStatus(realm, userId);
+        if (status != 204) {
+            throw new IllegalStateException("User delete returned " + status);
         }
+    }
+
+    int deleteUserStatus(String realm, String userId) throws IOException, InterruptedException {
+        return send(HttpRequest.newBuilder(
+                URI.create(baseUrl + "/admin/realms/" + realm + "/users/" + userId)).DELETE()).statusCode();
     }
 
     /**

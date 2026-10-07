@@ -105,13 +105,19 @@ public class AdaptiveRiskAuthenticator implements AuthenticationFlowCallback {
     }
 
     /**
-     * Reads the profile in its own transaction. On PostgreSQL a failed statement aborts the
-     * transaction it runs in, so a read failing inside the login's own transaction (a missing table,
-     * a timeout) would fail the login itself instead of failing open.
+     * Reads the profile on the login's own connection, isolated by a savepoint (see
+     * {@link JpaProfileStore#load}). Where the connection allows no savepoint, as inside an XA
+     * transaction, it reads in a transaction of its own instead, at the cost of a second pooled
+     * connection for that moment.
      */
     private RiskProfile loadProfile(String realmId, String userId) {
-        return KeycloakModelUtils.runJobInTransactionWithResult(session.getKeycloakSessionFactory(),
-                s -> JpaProfileStore.of(s).load(realmId, userId));
+        try {
+            return JpaProfileStore.of(session).load(realmId, userId);
+        } catch (JpaProfileStore.SavepointUnavailableException e) {
+            log.debugf("Adaptive risk reads the profile in a separate transaction: %s", e.getCause());
+            return KeycloakModelUtils.runJobInTransactionWithResult(session.getKeycloakSessionFactory(),
+                    s -> JpaProfileStore.of(s).loadWithJpa(realmId, userId));
+        }
     }
 
     /** Keycloak writes failure records only when brute force detection is on; null means skip the reason. */
@@ -169,10 +175,15 @@ public class AdaptiveRiskAuthenticator implements AuthenticationFlowCallback {
                     evaluation.country(), evaluation.hourUtc(), Time.currentTimeMillis(), null);
             String realmId = realm.getId();
             String userId = user.getId();
-            // Own transaction: a failed write (for example two first logins racing on the unique key)
-            // must not roll back the login itself.
-            KeycloakModelUtils.runJobInTransaction(session.getKeycloakSessionFactory(),
-                    s -> JpaProfileStore.of(s).recordSuccess(realmId, userId, login, retention));
+            // On the login's own connection, isolated by savepoints: a failed write never fails the
+            // login, and no second pooled connection is taken. Without savepoints (XA), a transaction
+            // of its own instead.
+            try {
+                JpaProfileStore.of(session).recordSuccessOnRequestConnection(realmId, userId, login, retention);
+            } catch (JpaProfileStore.SavepointUnavailableException e) {
+                KeycloakModelUtils.runJobInTransaction(session.getKeycloakSessionFactory(),
+                        s -> JpaProfileStore.of(s).recordSuccessWithJpa(realmId, userId, login, retention));
+            }
         } catch (Throwable t) {
             log.warnf("Adaptive risk could not record a successful login; the login is unaffected: %s",
                     t.getClass().getName());

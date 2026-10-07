@@ -2,6 +2,7 @@ package io.skycloak.keycloak.adaptiverisk.it;
 
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -32,11 +33,19 @@ class FailOpenIT {
 
     @BeforeAll
     static void importRealm() throws Exception {
-        assumeTrue(KeycloakTestServer.usesPostgres(), "needs the PostgreSQL-backed Keycloak");
+        if (!KeycloakTestServer.usesPostgres()) {
+            return;
+        }
         baseUrl = KeycloakTestServer.baseUrl();
         admin = new AdminClient(baseUrl);
         realm = "adaptive-failopen-" + UUID.randomUUID().toString().substring(0, 8);
         admin.importRealm(realmJson(realm));
+    }
+
+    /** Per test, so the tests show as skipped rather than vanish on the embedded database. */
+    @BeforeEach
+    void needsPostgres() {
+        assumeTrue(KeycloakTestServer.usesPostgres(), "needs the PostgreSQL-backed Keycloak");
     }
 
     @AfterAll
@@ -93,6 +102,27 @@ class FailOpenIT {
         } finally {
             KeycloakTestServer.sql("ALTER TABLE " + HIDDEN + " RENAME TO " + TABLE);
         }
+    }
+
+    @Test
+    void aLockedProfileTableFailsAUserDeletionFastInsteadOfLeavingItsProfileBehind() throws Exception {
+        String userId = admin.userId(realm, "erin");
+        CompletableFuture<String> lock = KeycloakTestServer.lockTable(TABLE, 20);
+        long started = System.nanoTime();
+        int status;
+        long seconds;
+        try {
+            status = admin.deleteUserStatus(realm, userId);
+            seconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started);
+        } finally {
+            lock.get(30, TimeUnit.SECONDS);
+        }
+
+        assertTrue(status >= 500, "the deletion must fail rather than orphan the profile, got " + status);
+        assertTrue(seconds < 10, "the deletion waited " + seconds + "s on the locked table");
+        // Nothing was half done: the user is still there, and deleting again works.
+        assertEquals(userId, admin.userId(realm, "erin"));
+        admin.deleteUser(realm, userId);
     }
 
     private static Map<String, String> lastLogin(String username) throws Exception {
