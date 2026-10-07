@@ -14,6 +14,7 @@ in the [README](../README.md).
 | Profile | `RiskProfile` | One user's bounded history, with recording, aging and eviction. |
 | Storage | `RiskProfileEntity`, `JpaProfileStore`, `IsolatedStatement`, `RiskProfileEntityProviderFactory` | Table declaration and Liquibase changelog, savepoint-isolated SQL reads and writes, and cleanup on user and realm removal. |
 | Request signals | `TrustedHeaders`, `Networks`, `DeviceCookie` | Client address and country from the trusted headers, network prefix, device cookie. |
+| Country | `CountryResolver`, `GeoIpCountry`, `MaxMindDbReader` | The country header, else a lookup of the client address in the operator's GeoIP database. |
 | Metric | `RiskMetrics` | `skycloak_adaptive_risk_evaluations{level, outcome, realm}`. |
 
 The scorer and the profile hold no Keycloak types, so all scoring rules are unit tested
@@ -49,8 +50,9 @@ request 3  POST OTP code (only if shown)   -> OTP succeeds
    - network: the address from the trusted IP header (first entry if it holds a list), else
      Keycloak's resolved address, reduced to IPv4 /24 or IPv6 /48. Only IP literals are
      parsed; nothing is ever resolved through DNS.
-   - country: the trusted country header, upper-cased, two characters; Cloudflare's `XX`
-     (unknown) is treated as absent.
+   - country: the trusted country header, else the GeoIP database's answer for the client
+     address above; upper-cased, two characters, with the placeholders `XX` and `ZZ` treated as
+     absent. See "GeoIP database" below.
    - hour: UTC hour of `Time.currentTimeMillis()`.
    - failures: Keycloak's brute force record (`session.loginFailures()`), or none when brute
      force detection is off.
@@ -186,6 +188,26 @@ table rewrite) until the lock goes or Keycloak's transaction timeout ends it. A 
 failure, such as the timeout on a locked table, fails the removal cleanly so the admin can retry
 it, rather than leaving the profile behind. The table itself stays if the extension is removed.
 
+## GeoIP database
+
+`SKYCLOAK_ADAPTIVE_RISK_GEOIP_DATABASE` names a file in the MaxMind DB format, the format of the
+common free and commercial IP geolocation databases. `MaxMindDbReader` is a small reader of that
+format written for this extension (see ADR 0002): it walks the search tree for one address and
+decodes the record into plain Java values, with every offset bounds checked, so a damaged file
+raises an error instead of reading outside the file. It supports record sizes 24, 28 and 32 and
+IPv4 and IPv6 trees; IPv4 addresses are looked up under `::/96` in an IPv6 tree.
+
+`GeoIpCountry` reads `country.iso_code` (the MaxMind and DB-IP layout) or a top-level
+`country_code` (a flat layout some other providers use). It holds the whole file in memory
+(country databases are under 20 MB; files over 512 MB are refused), and checks the file's
+modification time at most once a minute, loading a changed file and swapping it in only once it
+parsed. A missing, unreadable or damaged file turns lookups off, or keeps the last good file,
+with one warning per distinct file version. A lookup error gives no country, never
+`evaluation_error`: the country reasons are skipped, the rest of the score stands.
+
+The header wins whenever the request carries a usable one, so an edge that knows the country
+better than a database is never second-guessed.
+
 ## Fail open
 
 | Failure | Result |
@@ -197,6 +219,7 @@ it, rather than leaving the profile behind. The table itself stays if the extens
 | A profile statement broke the request's transaction (the rollback to its savepoint failed) | The transaction is marked rollback-only and the login fails with Keycloak's error page and a `LOGIN_ERROR` event. |
 | Profile table missing on user or realm removal | Warning log; the removal goes ahead. |
 | Profile delete fails otherwise (for example a user's delete timing out on a locked table) | The removal fails and can be retried once the table is free; no profile is left behind. |
+| GeoIP database missing, damaged, or a lookup throws | No country for that login; the country reasons are skipped. Logged once per file version. |
 | Micrometer missing or failing | Ignored. |
 
 Every statement of the extension is isolated by a savepoint, so none of these failures can abort
@@ -227,14 +250,17 @@ cookie name.
 - Unit (`mvn test`): every reason and its boundary, thresholds, weights, learning, the cap,
   profile caps, eviction order, aging, JSON round trip, settings parsing and defaults, header
   and prefix parsing, the device cookie, the condition, note round trip, event details, fail
-  open, and provider registration.
+  open, and provider registration. The GeoIP reader is tested against databases built by a
+  test-only writer of the format (every record size, IPv4 and IPv6 trees, pointers, every value
+  type, damaged files), and the country lookup against missing, damaged and replaced files.
 - Integration (`mvn verify`, `*IT`): Testcontainers boots `quay.io/keycloak/keycloak` with the
   jar on PostgreSQL (or on the embedded development database with `-Dkeycloak.db=dev-file`) and
   imports a realm with the README flow, then drives browser logins over HTTP: learning logins
   pass without step-up and set the cookie, a known browser stays low with the details on its
   `LOGIN` event, a fresh browser after learning gets the OTP form and abandoning it teaches
   nothing, passing the OTP form finishes the login with the details on its `LOGIN` event and
-  teaches the device, a high learning score is denied with the details on `LOGIN_ERROR`, and
+  teaches the device, a login without a country header gets its country from a fixture GeoIP
+  database, a high learning score is denied with the details on `LOGIN_ERROR`, and
   deleting a user and a realm with profiles succeeds. On PostgreSQL they also check that a
   missing profile table and a locked one both fail open with a redeemable code, that a user can
   still be deleted while the table is missing, and that a locked table fails a deletion quickly

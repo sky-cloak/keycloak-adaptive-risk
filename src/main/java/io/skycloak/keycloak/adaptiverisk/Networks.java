@@ -19,6 +19,25 @@ public final class Networks {
      *         literal, or null when the value is not an IP literal. Never resolves host names.
      */
     public static String prefix(String address) {
+        byte[] b = parse(address);
+        if (b == null) {
+            return null;
+        }
+        if (b.length == 4) {
+            return (b[0] & 0xff) + "." + (b[1] & 0xff) + "." + (b[2] & 0xff) + ".0/24";
+        }
+        return String.format("%x:%x:%x::/48",
+                ((b[0] & 0xff) << 8) | (b[1] & 0xff),
+                ((b[2] & 0xff) << 8) | (b[3] & 0xff),
+                ((b[4] & 0xff) << 8) | (b[5] & 0xff));
+    }
+
+    /**
+     * @return the 4 bytes of an IPv4 literal (also when written as IPv4-mapped IPv6), the 16 bytes
+     *         of an IPv6 literal, or null when the value is not an IP literal. Never resolves host
+     *         names.
+     */
+    public static byte[] parse(String address) {
         if (address == null) {
             return null;
         }
@@ -34,7 +53,7 @@ public final class Networks {
             return null;
         }
         if (IPV4.matcher(value).matches()) {
-            return ipv4Prefix(value);
+            return ipv4(value);
         }
         if (value.indexOf(':') < 0 || !IPV6_LITERAL.matcher(value).matches()) {
             return null;
@@ -42,15 +61,8 @@ public final class Networks {
         try {
             // A literal containing ':' is parsed, never looked up.
             InetAddress parsed = InetAddress.getByName(value);
-            if (parsed instanceof Inet4Address) {
-                return ipv4Prefix(parsed.getHostAddress());
-            }
-            if (parsed instanceof Inet6Address) {
-                byte[] b = parsed.getAddress();
-                return String.format("%x:%x:%x::/48",
-                        ((b[0] & 0xff) << 8) | (b[1] & 0xff),
-                        ((b[2] & 0xff) << 8) | (b[3] & 0xff),
-                        ((b[4] & 0xff) << 8) | (b[5] & 0xff));
+            if (parsed instanceof Inet4Address || parsed instanceof Inet6Address) {
+                return parsed.getAddress();
             }
             return null;
         } catch (Exception e) {
@@ -58,13 +70,16 @@ public final class Networks {
         }
     }
 
-    private static String ipv4Prefix(String dotted) {
+    private static byte[] ipv4(String dotted) {
         String[] parts = dotted.split("\\.");
-        for (String part : parts) {
-            if (Integer.parseInt(part) > 255) {
+        byte[] bytes = new byte[4];
+        for (int i = 0; i < 4; i++) {
+            int part = Integer.parseInt(parts[i]);
+            if (part > 255) {
                 return null;
             }
+            bytes[i] = (byte) part;
         }
-        return Integer.parseInt(parts[0]) + "." + Integer.parseInt(parts[1]) + "." + Integer.parseInt(parts[2]) + ".0/24";
+        return bytes;
     }
 }

@@ -207,6 +207,17 @@ class AdaptiveRiskIT {
     }
 
     @Test
+    void withoutACountryHeaderTheCountryComesFromTheGeoIpDatabase() throws Exception {
+        Browser browser = new Browser(baseUrl, "198.51.100.7", null);
+
+        Browser.Result login = browser.login(realm, "carol", "carol-password");
+
+        assertEquals(Browser.Outcome.LOGGED_IN, login.outcome(), () -> describe(login));
+        Map<String, String> details = admin.eventDetails(realm, admin.userId(realm, "carol"), "LOGIN").get(0);
+        assertEquals(KeycloakTestServer.GEOIP_COUNTRY, details.get("risk_country"));
+    }
+
+    @Test
     void aConfiguredHighScoreIsDeniedAndTheErrorEventCarriesTheRisk() throws Exception {
         Browser browser = new Browser(baseUrl, HOME_IP, HOME_COUNTRY);
 
