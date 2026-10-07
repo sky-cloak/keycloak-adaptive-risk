@@ -110,6 +110,36 @@ class AdaptiveRiskIT {
     }
 
     @Test
+    void passingStepUpLearnsTheDeviceAndTheLoginEventCarriesTheRisk() throws Exception {
+        Browser home = new Browser(baseUrl, HOME_IP, HOME_COUNTRY);
+        for (int i = 1; i <= 3; i++) {
+            Browser.Result learning = home.login(realm, "erin", "erin-password");
+            assertEquals(Browser.Outcome.LOGGED_IN, learning.outcome(), () -> describe(learning));
+            home.forgetSession();
+        }
+
+        Browser laptop = new Browser(baseUrl, HOME_IP, HOME_COUNTRY);
+        Browser.Result stepUp = laptop.login(realm, "erin", "erin-password");
+        assertEquals(Browser.Outcome.OTP_FORM, stepUp.outcome(), () -> describe(stepUp));
+        Browser.Result passed = laptop.submitOtp(stepUp, Totp.now());
+
+        assertEquals(Browser.Outcome.LOGGED_IN, passed.outcome(), () -> describe(passed));
+        assertEquals(200, laptop.exchangeCode(realm, passed));
+        assertDeviceCookie(passed.setCookies());
+        // The evaluation ran in the request before the OTP form; its details still reach this LOGIN.
+        Map<String, String> details = admin.eventDetails(realm, admin.userId(realm, "erin"), "LOGIN").get(0);
+        assertEquals("medium", details.get("risk_level"));
+        assertEquals("new_device", details.get("risk_reasons"));
+        assertEquals("30", details.get("risk_score"));
+        assertNoPersonalData(details);
+
+        // The step-up taught the profile this browser: next time it is not asked again.
+        laptop.forgetSession();
+        Browser.Result again = laptop.login(realm, "erin", "erin-password");
+        assertEquals(Browser.Outcome.LOGGED_IN, again.outcome(), () -> describe(again));
+    }
+
+    @Test
     void aConfiguredHighScoreIsDeniedAndTheErrorEventCarriesTheRisk() throws Exception {
         Browser browser = new Browser(baseUrl, HOME_IP, HOME_COUNTRY);
 

@@ -14,6 +14,15 @@ import java.util.List;
 /** Reads and writes profiles through the Keycloak session's entity manager. */
 public final class JpaProfileStore {
 
+    /**
+     * Longest a profile read may take before it fails and the evaluation fails open, so a locked or
+     * overloaded table slows a login by at most this much. Also bounds the wait for the row lock
+     * when a successful login is recorded.
+     */
+    static final int QUERY_TIMEOUT_MILLIS = 2000;
+    private static final String QUERY_TIMEOUT_HINT = "jakarta.persistence.query.timeout";
+    private static final String LOCK_TIMEOUT_HINT = "jakarta.persistence.lock.timeout";
+
     private final EntityManager em;
 
     public JpaProfileStore(EntityManager em) {
@@ -76,6 +85,8 @@ public final class JpaProfileStore {
                 .setParameter("realmId", realmId)
                 .setParameter("userId", userId)
                 .setLockMode(lock)
+                .setHint(QUERY_TIMEOUT_HINT, QUERY_TIMEOUT_MILLIS)
+                .setHint(LOCK_TIMEOUT_HINT, QUERY_TIMEOUT_MILLIS)
                 .getResultList();
         return rows.isEmpty() ? null : rows.get(0);
     }

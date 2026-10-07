@@ -93,15 +93,25 @@ public class AdaptiveRiskAuthenticator implements AuthenticationFlowCallback {
         LoginSignals signals = new LoginSignals(hasDevice ? DeviceCookie.hash(deviceId) : null, network, country,
                 hour, now, failures(realm, user));
 
-        Assessment assessment = Evaluation.assess(settings,
-                () -> JpaProfileStore.of(session).load(realm.getId(), user.getId()),
-                () -> signals);
+        String realmId = realm.getId();
+        String userId = user.getId();
+        Assessment assessment = Evaluation.assess(settings, () -> loadProfile(realmId, userId), () -> signals);
         if (assessment.failed()) {
             log.warnf("Adaptive risk evaluation failed open to low: the profile could not be read (realm=%s)",
                     realm.getName());
         }
         return new Evaluation(Evaluation.outcomeOf(assessment), user.getId(), assessment, country, deviceId,
                 network, hour);
+    }
+
+    /**
+     * Reads the profile in its own transaction. On PostgreSQL a failed statement aborts the
+     * transaction it runs in, so a read failing inside the login's own transaction (a missing table,
+     * a timeout) would fail the login itself instead of failing open.
+     */
+    private RiskProfile loadProfile(String realmId, String userId) {
+        return KeycloakModelUtils.runJobInTransactionWithResult(session.getKeycloakSessionFactory(),
+                s -> JpaProfileStore.of(s).load(realmId, userId));
     }
 
     /** Keycloak writes failure records only when brute force detection is on; null means skip the reason. */

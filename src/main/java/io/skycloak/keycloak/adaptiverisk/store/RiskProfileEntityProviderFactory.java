@@ -8,9 +8,11 @@ import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.KeycloakSessionFactory;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
+import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.provider.ProviderEvent;
 
 import java.util.List;
+import java.util.function.ToIntFunction;
 
 /**
  * Registers the profile entity and its Liquibase changelog with Keycloak, and deletes profile
@@ -69,15 +71,34 @@ public class RiskProfileEntityProviderFactory implements JpaEntityProviderFactor
         factory.register(RiskProfileEntityProviderFactory::onEvent);
     }
 
+    /**
+     * Deletes the profile rows of a removed user or realm, in a transaction of their own: on
+     * PostgreSQL a failing delete inside the removal's transaction (for example a missing table)
+     * would abort the removal itself. If the removal later rolls back, the user only loses their
+     * learned profile, which relearns.
+     */
     static void onEvent(ProviderEvent event) {
-        // Runs in the deleting transaction, so the rows go if and only if the user or realm goes.
         if (event instanceof UserModel.UserRemovedEvent removed) {
-            int rows = JpaProfileStore.of(removed.getKeycloakSession())
-                    .deleteUser(removed.getRealm().getId(), removed.getUser().getId());
-            log.debugf("Deleted %d adaptive risk profile(s) of a removed user (realm=%s)", rows, removed.getRealm().getName());
+            String realmId = removed.getRealm().getId();
+            String userId = removed.getUser().getId();
+            delete(removed.getKeycloakSession().getKeycloakSessionFactory(), removed.getRealm().getName(), "user",
+                    store -> store.deleteUser(realmId, userId));
         } else if (event instanceof RealmModel.RealmRemovedEvent removed) {
-            int rows = JpaProfileStore.of(removed.getKeycloakSession()).deleteRealm(removed.getRealm().getId());
-            log.debugf("Deleted %d adaptive risk profile(s) of a removed realm (realm=%s)", rows, removed.getRealm().getName());
+            String realmId = removed.getRealm().getId();
+            delete(removed.getKeycloakSession().getKeycloakSessionFactory(), removed.getRealm().getName(), "realm",
+                    store -> store.deleteRealm(realmId));
+        }
+    }
+
+    private static void delete(KeycloakSessionFactory factory, String realmName, String what,
+                               ToIntFunction<JpaProfileStore> deletion) {
+        try {
+            int rows = KeycloakModelUtils.runJobInTransactionWithResult(factory,
+                    s -> deletion.applyAsInt(JpaProfileStore.of(s)));
+            log.debugf("Deleted %d adaptive risk profile(s) of a removed %s (realm=%s)", rows, what, realmName);
+        } catch (RuntimeException e) {
+            log.warnf("Adaptive risk could not delete the profile(s) of a removed %s; the removal is unaffected: %s (realm=%s)",
+                    what, e.getClass().getName(), realmName);
         }
     }
 

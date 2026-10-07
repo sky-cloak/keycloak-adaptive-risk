@@ -137,32 +137,37 @@ Each write refreshes the entries the login touched, drops entries unseen for the
 a long absence is still compared with their old history once, and the successful login then
 replaces it.
 
-**Transactions.** The read uses the request's own entity manager: it is one indexed select.
-The write runs in its own transaction (`KeycloakModelUtils.runJobInTransaction`, which
-suspends the request's JTA transaction), so a failed write, such as two first logins of the
-same user racing on the unique key, is caught and logged and cannot roll back the login. The
-losing race costs one learning login. For an existing profile the read takes a row lock
-(`PESSIMISTIC_WRITE`, `SELECT ... FOR UPDATE`), so concurrent logins of one user queue and each
-merges into the history the previous one committed.
+**Transactions.** The read and the write each run in a transaction of their own
+(`KeycloakModelUtils.runJobInTransaction`, which suspends the request's JTA transaction). On
+PostgreSQL a failed statement aborts the transaction it runs in, so a read failing inside the
+login's own transaction (a missing table, a timeout) would fail the login instead of failing
+open. The read is one indexed select with a 2 second query timeout, so a locked or overloaded
+table delays a login by at most that much before the evaluation fails open. A failed write, such
+as two first logins of the same user racing on the unique key, is caught and logged and cannot
+roll back the login. The losing race costs one learning login. For an existing profile the write's read takes a row
+lock (`PESSIMISTIC_WRITE`, `SELECT ... FOR UPDATE`, with the same 2 second timeout), so
+concurrent logins of one user queue and each merges into the history the previous one committed.
 
 **Cleanup.** The entity provider factory listens for `UserModel.UserRemovedEvent` and
-`RealmModel.RealmRemovedEvent` and bulk-deletes the matching rows in the deleting transaction,
-so the rows go if and only if the user or realm goes. The table itself stays if the extension
-is removed.
+`RealmModel.RealmRemovedEvent` and bulk-deletes the matching rows in a transaction of its own,
+for the same reason as the read: a failing delete inside the removal's transaction would abort
+the removal on PostgreSQL. A failed delete is logged and never blocks the removal. If the removal
+rolls back after the rows were deleted, the user only loses their learned profile, which
+relearns. The table itself stays if the extension is removed.
 
 ## Fail open
 
 | Failure | Result |
 |---|---|
-| Profile read, JSON parse or scoring throws | Level low, reasons `evaluation_error`, `outcome=error` metric, warning log naming only the realm (the exception is logged at debug). The login continues. |
+| Profile read fails or takes longer than 2 seconds, JSON parse or scoring throws | Level low, reasons `evaluation_error`, `outcome=error` metric, warning log naming only the realm (the exception is logged at debug). The login continues. |
 | Building the signals throws (for example the brute force store) | Same as above. |
 | Adding event details on parent flow success throws | Warning log; the login continues without re-added details. |
 | Cookie or profile write throws | Warning log; the login, which already succeeded, is unaffected. |
+| Profile delete on user or realm removal throws | Warning log; the removal is unaffected. |
 | Micrometer missing or failing | Ignored. |
 
-A database error on the read may still fail the request on databases that abort a transaction
-after a failed statement (PostgreSQL). In that case the rest of the login could not have
-committed either; the extension does not make it worse.
+Every database call of the extension runs in its own transaction, so none of these failures can
+abort the transaction of the login or of the removal, including on PostgreSQL.
 
 ## Event details and logs
 
@@ -191,8 +196,13 @@ cookie name.
   and prefix parsing, the device cookie, the condition, note round trip, event details, fail
   open, and provider registration.
 - Integration (`mvn verify`, `*IT`): Testcontainers boots `quay.io/keycloak/keycloak` with the
-  jar and imports a realm with the README flow, then drives browser logins over HTTP: learning
-  logins pass without step-up and set the cookie, a known browser stays low with the details on
-  its `LOGIN` event, a fresh browser after learning gets the OTP form and abandoning it teaches
-  nothing, a high learning score is denied with the details on `LOGIN_ERROR`, and deleting a
-  user and a realm with profiles succeeds. CI runs this on Keycloak 26.2.5 and 26.7.4.
+  jar on PostgreSQL (or on the embedded development database with `-Dkeycloak.db=dev-file`) and
+  imports a realm with the README flow, then drives browser logins over HTTP: learning logins
+  pass without step-up and set the cookie, a known browser stays low with the details on its
+  `LOGIN` event, a fresh browser after learning gets the OTP form and abandoning it teaches
+  nothing, passing the OTP form finishes the login with the details on its `LOGIN` event and
+  teaches the device, a high learning score is denied with the details on `LOGIN_ERROR`, and
+  deleting a user and a realm with profiles succeeds. On PostgreSQL they also check that a
+  missing profile table and a locked one both fail open with a redeemable code, and that a user
+  can still be deleted while the table is missing. CI runs this on Keycloak 26.2.5 and 26.7.4,
+  each on both databases.
