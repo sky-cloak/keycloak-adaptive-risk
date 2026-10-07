@@ -125,6 +125,8 @@ public class AdaptiveRiskAuthenticatorFactory implements AuthenticationFlowCallb
 
     @Override
     public void close() {
-        // Stateless.
+        if (countries.geoIp() != null) {
+            countries.geoIp().close();
+        }
     }
 }

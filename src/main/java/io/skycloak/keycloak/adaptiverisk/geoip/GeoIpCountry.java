@@ -9,6 +9,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Map;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.LongSupplier;
@@ -24,7 +25,7 @@ import java.util.function.LongSupplier;
  * never fails a login: lookups give no country (or keep using the last good file) and the problem
  * is logged.
  */
-public final class GeoIpCountry {
+public final class GeoIpCountry implements AutoCloseable {
 
     public static final String ENV_DATABASE = "SKYCLOAK_ADAPTIVE_RISK_GEOIP_DATABASE";
     static final long RELOAD_CHECK_MILLIS = 60_000;
@@ -119,6 +120,22 @@ public final class GeoIpCountry {
         return map.get("country_code") instanceof String code ? Countries.normalize(code) : null;
     }
 
+    /** Stops the background reload thread. */
+    @Override
+    public void close() {
+        if (reloads instanceof ExecutorService service) {
+            service.shutdownNow();
+        }
+    }
+
+    private static String describeBuild(long epochSeconds) {
+        try {
+            return epochSeconds > 0 ? Instant.ofEpochSecond(epochSeconds).toString() : "unknown";
+        } catch (RuntimeException e) {
+            return "unknown";
+        }
+    }
+
     private void scheduleReloadIfDue() {
         long now = clock.getAsLong();
         if (now < nextCheck || !reloadPending.compareAndSet(false, true)) {
@@ -133,7 +150,8 @@ public final class GeoIpCountry {
                     reloadPending.set(false);
                 }
             });
-        } catch (RuntimeException e) {
+        } catch (RuntimeException | Error e) {
+            // For example no thread could be started: try again at the next check.
             reloadPending.set(false);
         }
     }
@@ -161,10 +179,10 @@ public final class GeoIpCountry {
                         "file is " + version.size() + " bytes, more than the " + MAX_FILE_BYTES + " allowed");
             }
             MaxMindDbReader reader = new MaxMindDbReader(Files.readAllBytes(path));
+            String built = describeBuild(reader.buildEpoch());
             current = new Loaded(reader, version);
             failed = null;
-            log.infof("Adaptive risk GeoIP database loaded: %s (%s, built %s)", path, reader.databaseType(),
-                    reader.buildEpoch() > 0 ? Instant.ofEpochSecond(reader.buildEpoch()) : "unknown");
+            log.infof("Adaptive risk GeoIP database loaded: %s (%s, built %s)", path, reader.databaseType(), built);
         } catch (Exception | OutOfMemoryError e) {
             failed = version;
             log.warnf("Adaptive risk GeoIP database %s could not be loaded (%s: %s); %s", path,

@@ -127,6 +127,10 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.2.5</version>
+                <configuration>
+                    <!-- Small on purpose: a GeoIP reader regression that preallocates from an untrusted size runs out of memory here. -->
+                    <argLine>-Xmx192m</argLine>
+                </configuration>
             </plugin>
             <!-- Integration tests (*IT.java) boot Keycloak with the packaged jar: mvn verify -->
             <plugin>

@@ -193,8 +193,12 @@ class MaxMindDbReaderTest {
         data[1] = (byte) 0xFF;
         data[2] = (byte) 0xFF;
         data[3] = (byte) 0xFF;
-        // The first "key" is a uint32, not a string.
-        data[4] = (byte) (6 << 5);
+        // A valid first pair, so a reader that sized its map from the claim would allocate it here.
+        // Unit tests run with a small heap (pom.xml), where that allocation fails.
+        data[4] = 0x41;
+        data[5] = 'a';
+        data[6] = 0x41;
+        data[7] = 'b';
 
         assertThrows(MaxMindDbReader.InvalidDatabaseException.class, () -> MaxMindDbReader.decodeForTest(data, 0));
     }
